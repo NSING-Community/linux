@@ -1574,6 +1574,8 @@ static unsigned long do_mremap(unsigned long addr,
 			unsigned long flags, unsigned long new_addr)
 {
 	struct vm_area_struct *vma;
+	VMA_ITERATOR(vmi, current->mm, addr);
+	int ret;
 
 	/* insanity checks first */
 	old_len = PAGE_ALIGN(old_len);
@@ -1600,8 +1602,23 @@ static unsigned long do_mremap(unsigned long addr,
 	if (new_len > vma->vm_region->vm_end - vma->vm_region->vm_start)
 		return (unsigned long) -ENOMEM;
 
-	/* all checks complete - do it */
-	vma->vm_end = vma->vm_start + new_len;
+	if (new_len == old_len)
+		return vma->vm_start;
+
+	/* Resize the tree entry without releasing the backing region. */
+	if (new_len < old_len) {
+		ret = vma_iter_clear_gfp(&vmi, addr + new_len, addr + old_len,
+					 GFP_KERNEL);
+		if (ret)
+			return (unsigned long)ret;
+		vma->vm_end = addr + new_len;
+	} else {
+		vma_iter_config(&vmi, addr, addr + new_len);
+		if (vma_iter_prealloc(&vmi, vma))
+			return (unsigned long)-ENOMEM;
+		vma->vm_end = addr + new_len;
+		vma_iter_store_overwrite(&vmi, vma);
+	}
 	return vma->vm_start;
 }
 

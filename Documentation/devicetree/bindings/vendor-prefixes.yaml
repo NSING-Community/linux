@@ -1227,6 +1227,8 @@ patternProperties:
     description: New Vision Display
   "^nvidia,.*":
     description: NVIDIA
+  "^nsing,.*":
+    description: NSING Technologies
   "^nxp,.*":
     description: NXP Semiconductors
   "^oceanic,.*":

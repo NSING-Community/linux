@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: GPL-2.0-only
+menuconfig ARCH_NSING
+	bool "NSING SoC support"
+	depends on ARM_SINGLE_ARMV7M
+	select CLKSRC_MMIO
+	select RESET_CONTROLLER
+	help
+	  Support for NSING SoCs.  The current N32H7xx family uses a
+	  Cortex-M7 core and boots Linux with the ARMv7-M NOMMU port.
+	  Enable this to build platform support for boards using these SoCs.
+	  Individual peripheral drivers are selected separately.
+
+if ARCH_NSING
+
+config SOC_N32H7XX
+	bool "NSING N32H7xx family"
+	default y
+	help
+	  Support for the NSING N32H7xx family.  N32H787 is the first
+	  supported member and combines a Cortex-M7 with a Cortex-M4.
+	  Linux runs on the Cortex-M7 and uses external SDRAM for memory.
+	  The Cortex-M4 is not managed by this platform support.
+
+endif

@@ -1,0 +1,138 @@
+# CONFIG_MMU is not set
+CONFIG_BLK_DEV_INITRD=y
+# Empty on purpose: the userland is a separate SquashFS partition (mtd2) that the
+# kernel mounts via the DTB bootargs, so the kernel must not embed a copy of it.
+# Leaving this set to the mach-nsing tree silently doubled the userland in ROM
+# (once in zImage, once in the rootfs partition).  Empty is not the same as "no
+# initramfs": kbuild falls back to usr/default_cpio_list (a ~1 KiB list that only
+# carries /dev/console), which console_on_rootfs() needs before devtmpfs appears.
+CONFIG_INITRAMFS_SOURCE=""
+CONFIG_INITRAMFS_COMPRESSION_NONE=y
+
+CONFIG_ARCH_NSING=y
+CONFIG_SOC_N32H7XX=y
+CONFIG_CPU_V7M_NUM_IRQ=240
+CONFIG_CPU_V7M_FPU=y
+
+CONFIG_SET_MEM_PARAM=y
+CONFIG_DRAM_BASE=0xc0000000
+CONFIG_DRAM_SIZE=0x02000000
+# CONFIG_XIP_KERNEL is not set
+CONFIG_ARM_APPENDED_DTB=y
+
+CONFIG_NO_HZ_IDLE=y
+CONFIG_HIGH_RES_TIMERS=y
+CONFIG_PREEMPT=y
+CONFIG_LOG_BUF_SHIFT=16
+CONFIG_CC_OPTIMIZE_FOR_SIZE=y
+CONFIG_EXPERT=y
+CONFIG_BASE_SMALL=y
+
+# CONFIG_UID16 is not set
+CONFIG_POSIX_TIMERS=y
+# uClibc-ng NPTL routes its userspace lock waits through lll_futex_wait().
+# With futex disabled that syscall returns -ENOSYS and the lock helper falls
+# back to a bare spin, so a waiter can never sleep.  Observed on the board:
+# a process parked in the lock-helper loop with -ENOSYS in r0 and back-to-back
+# SVC instructions.  Which lock that word belongs to and why it was already
+# held are NOT established -- see diagnostics/ssh-corruption-2026-10-11/.
+# The reference config (n32h7xx-20261007 firmware/production/kernel.config)
+# also has CONFIG_FUTEX=y.
+CONFIG_FUTEX=y
+# EPOLL/SIGNALFD/EVENTFD stay off for now: this build is the strict
+# single-variable A/B against #24, so only the futex syscall the uClibc lock
+# path needs is added.  Re-enabling the rest is a separate change to test.
+# CONFIG_EPOLL is not set
+# CONFIG_SIGNALFD is not set
+# CONFIG_EVENTFD is not set
+# CONFIG_AIO is not set
+# CONFIG_IO_URING is not set
+# CONFIG_ADVISE_SYSCALLS is not set
+
+CONFIG_BINFMT_FLAT=y
+# CONFIG_COREDUMP is not set
+CONFIG_DEVTMPFS=y
+CONFIG_DEVTMPFS_MOUNT=y
+# CONFIG_FW_LOADER is not set
+CONFIG_PROC_FS=y
+CONFIG_SYSFS=y
+# No tmpfs on this target: CONFIG_SHMEM depends on MMU, and this kernel is
+# no-MMU.  rcS mounts ramfs over /tmp, /run and /var/log instead.
+
+# CONFIG_VT is not set
+CONFIG_UNIX98_PTYS=y
+# CONFIG_LEGACY_PTYS is not set
+CONFIG_SERIAL_N32H7XX=y
+CONFIG_SERIAL_EARLYCON=y
+
+CONFIG_NET=y
+CONFIG_PACKET=y
+CONFIG_UNIX=y
+CONFIG_INET=y
+CONFIG_NETDEVICES=y
+CONFIG_NET_VENDOR_NSING=y
+CONFIG_PHYLIB=y
+CONFIG_JL1111_PHY=y
+CONFIG_N32H7XX_ETH=y
+
+# --- pin control and GPIO ---------------------------------------------------
+# Every peripheral pin is routed by the N32H7xx pin controller.  The GPIO
+# banks are part of the same register block and are what the device tree uses
+# for reset and power-enable lines.
+#
+# The classic /sys/class/gpio interface is kept on purpose.  The character
+# device ABI (/dev/gpiochipN) is the modern one and stays enabled too, but
+# /sys/class/gpio/export plus gpioN/{direction,value} is what board users and
+# vendor scripts reach for first, and it needs no userspace library.  The
+# _LEGACY option is what adds export/unexport and the per-line gpioN
+# directories; without it only the gpiochipN directories show up.
+CONFIG_PINCTRL=y
+CONFIG_GPIOLIB=y
+CONFIG_PINCTRL_N32H7XX=y
+CONFIG_GPIO_SYSFS=y
+CONFIG_GPIO_SYSFS_LEGACY=y
+
+CONFIG_MTD=y
+CONFIG_MTD_BLOCK=y
+CONFIG_MTD_SPI_NOR=y
+CONFIG_SPI=y
+CONFIG_SPI_N32H7XX_XSPI=y
+
+# --- real time clock --------------------------------------------------------
+# The RTC counts the on-board 32.768 kHz LSE crystal.  There is no battery, so
+# the kernel still starts at the epoch after a power cycle and NTP steps it;
+# hctosys is what makes a warm reset pick the time back up.
+CONFIG_RTC_CLASS=y
+CONFIG_RTC_HCTOSYS=y
+CONFIG_RTC_DRV_N32H7XX=y
+
+# --- filesystems ------------------------------------------------------------
+# SquashFS is the read-only rootfs; JFFS2 is the writable /system volume.
+CONFIG_MISC_FILESYSTEMS=y
+CONFIG_SQUASHFS=y
+CONFIG_SQUASHFS_FILE_CACHE=y
+CONFIG_SQUASHFS_COMPILE_DECOMP_SINGLE=y
+CONFIG_SQUASHFS_ZLIB=y
+CONFIG_JFFS2_FS=y
+CONFIG_JFFS2_ZLIB=y
+# FAT/exFAT are for removable media (SD/USB) and the busybox mkfs.vfat tools.
+CONFIG_NLS=y
+CONFIG_NLS_CODEPAGE_437=y
+CONFIG_NLS_ISO8859_1=y
+CONFIG_NLS_UTF8=y
+CONFIG_MSDOS_FS=y
+CONFIG_VFAT_FS=y
+CONFIG_FAT_DEFAULT_CODEPAGE=437
+CONFIG_FAT_DEFAULT_IOCHARSET="utf8"
+CONFIG_EXFAT_FS=y
+
+CONFIG_MMC=y
+CONFIG_MMC_BLOCK=y
+CONFIG_MMC_SDHCI=y
+CONFIG_MMC_SDHCI_PLTFM=y
+CONFIG_MMC_N32H7XX_SDHCI=y
+
+CONFIG_PRINTK=y
+CONFIG_PRINTK_TIME=y
+CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT=y
+# CONFIG_CPU_DCACHE_DISABLE is not set

@@ -397,6 +397,7 @@ config NCN26000_PHY
 	  Currently supports the NCN26000 10BASE-T1S Industrial PHY
 	  with MII interface.
 
+source "drivers/net/phy/nsing/Kconfig"
 source "drivers/net/phy/qcom/Kconfig"
 
 config QSEMI_PHY

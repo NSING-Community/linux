@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# NSING Ethernet PHY configuration
+#
+
+config JL1111_PHY
+	tristate "JLSemi JL1111 Fast Ethernet PHY"
+	help
+	  Supports the JLSemi JL1111 10/100 Mbps Ethernet PHY.  The driver
+	  also configures the RMII reference clock direction so that the PHY
+	  drives REF_CLK for MACs that consume it.
+	  To build the driver as a module, choose M here.

@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: GPL-2.0-only
+
+config SPI_N32H7XX_XSPI
+	tristate "NSING N32H7xx XSPI controller"
+	depends on ARCH_NSING
+	depends on SPI_MASTER && HAS_IOMEM
+	select SPI_DESIGNWARE
+	help
+	  This enables the NSING N32H7xx platform interface to the DWC SSI
+	  controller core. SPI messages and SPI memory operations use the
+	  existing DesignWare driver.
+
+	  Say Y here if you are building a kernel for an NSING N32H7xx SoC.

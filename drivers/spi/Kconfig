@@ -1453,4 +1453,8 @@ config SPI_OFFLOAD_TRIGGER_PWM
 
 endif # SPI_OFFLOAD
 
+if ARCH_NSING
+source "drivers/spi/nsing/Kconfig"
+endif
+
 endif # SPI

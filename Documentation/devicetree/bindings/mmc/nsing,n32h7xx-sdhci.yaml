@@ -1,0 +1,65 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/mmc/nsing,n32h7xx-sdhci.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: NSING N32H7xx SDMMC controller
+
+maintainers:
+  - Tobby Tan <tan.bo@nsingtech.com>
+
+allOf:
+  - $ref: mmc-controller.yaml#
+
+properties:
+  compatible:
+    const: nsing,n32h7xx-sdhci
+
+  reg:
+    items:
+      - description: SDHCI host registers
+      - description: NSING capability wrapper registers
+
+  interrupts:
+    maxItems: 1
+
+  reg-names:
+    items:
+      - const: host
+      - const: wrapper
+
+required:
+  - compatible
+  - reg
+  - interrupts
+
+unevaluatedProperties: false
+
+examples:
+  - |
+    pinctrl {
+        sdmmc1_pins: sdmmc1-pins {
+            pins = "PC12", "PD2", "PC8", "PC9", "PC10", "PC11";
+            function = "sdmmc1";
+            bias-pull-up;
+            drive-strength = <2>;
+            slew-rate = <0>;
+        };
+    };
+
+    mmc@51110000 {
+        compatible = "nsing,n32h7xx-sdhci";
+        reg = <0x51110000 0x400>, <0x51107000 0x400>;
+        reg-names = "host", "wrapper";
+        interrupts = <135>;
+        bus-width = <4>;
+        max-frequency = <25000000>;
+        broken-cd;
+        disable-wp;
+        no-1-8-v;
+        no-mmc;
+        no-sdio;
+        pinctrl-names = "default";
+        pinctrl-0 = <&sdmmc1_pins>;
+    };

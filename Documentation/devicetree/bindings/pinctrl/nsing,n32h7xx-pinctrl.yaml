@@ -1,0 +1,186 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/pinctrl/nsing,n32h7xx-pinctrl.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: NSING N32H7xx pin controller and GPIO
+
+maintainers:
+  - Tobby Tan <tan.bo@nsingtech.com>
+
+description: |
+  The N32H7xx has eleven GPIO ports (A..K) of sixteen pins each.  One register
+  block per port selects the mode, alternate-function number, pull resistor,
+  slew rate and drive strength of every pin and also holds its GPIO data
+  register, so a single node is both the pin controller and the parent of the
+  eleven GPIO banks.
+
+  Which peripheral signal a pin carries is a property of the series and is
+  compiled into the driver, so a board only names the pins it uses and the
+  signal it wants on them.  A pin is identified by its package name, PA0
+  through PK15.
+
+  Pin groups are described as child nodes of the pin controller.  A group is
+  either a single pin configuration applied to a list of pins, or a set of
+  nested sub-groups when the pins need different configuration.  Every group
+  and sub-group node name ends in "-pins".
+
+properties:
+  compatible:
+    const: nsing,n32h7xx-pinctrl
+
+  reg:
+    maxItems: 1
+
+  "#address-cells":
+    const: 1
+
+  "#size-cells":
+    const: 1
+
+patternProperties:
+  "^gpio@[0-9a-f]+$":
+    type: object
+    additionalProperties: false
+    description:
+      One GPIO bank per port.  The bank offset inside the pin controller
+      register window selects the port, so the banks must be ordered by
+      address.
+
+    properties:
+      reg:
+        maxItems: 1
+
+      gpio-controller: true
+
+      "#gpio-cells":
+        const: 2
+
+      gpio-ranges:
+        maxItems: 1
+
+    required:
+      - reg
+      - gpio-controller
+      - "#gpio-cells"
+
+  "^[a-z0-9-]+-pins$":
+    $ref: "#/$defs/pin-group"
+
+required:
+  - compatible
+  - reg
+
+additionalProperties: false
+
+$defs:
+  pin-group:
+    type: object
+    description: |
+      A pin group.  Either list the pins in "pins" and set "function" plus the
+      pad configuration directly, or nest one sub-group per set of pins that
+      needs its own configuration.  Sub-group node names also end in "-pins".
+
+    properties:
+      pins:
+        $ref: /schemas/types.yaml#/definitions/string-array
+        description:
+          Package pin names, PA0..PK15.
+
+      function:
+        $ref: /schemas/types.yaml#/definitions/string
+        description: |
+          One of:
+          - a signal name such as "usart1_tx", which selects the exact
+            alternate function that carries that signal;
+          - a peripheral name such as "usart1", which selects whatever signal
+            that peripheral has on each listed pin;
+          - the bare "gpio" or "analog";
+          - an explicit "af0".."af15".
+
+          A peripheral name is rejected where it names two different signals on
+          one pin; the group then has to spell the exact signal name out.
+
+      bias-disable:
+        type: boolean
+
+      bias-pull-up:
+        type: boolean
+
+      bias-pull-down:
+        type: boolean
+
+      drive-strength:
+        $ref: /schemas/types.yaml#/definitions/uint32
+        enum: [0, 1, 2, 3]
+        description: |
+          Raw GPIO drive-strength encoding, not a current in mA.  On a 3.3 V
+          IO pad the encodings are 0 = 2 mA, 1 = 8 mA, 2 = 4 mA and 3 = 12 mA.
+
+      slew-rate:
+        $ref: /schemas/types.yaml#/definitions/uint32
+        enum: [0, 1]
+        description: 0 selects fast edges, 1 selects slow edges.
+
+      nsing,hs-drive-strength-high:
+        type: boolean
+        description:
+          On a high-speed pad, select the high-current driver bank instead of
+          the low-current one.
+
+      drive-open-drain:
+        type: boolean
+
+      drive-push-pull:
+        type: boolean
+
+      output-enable:
+        type: boolean
+
+      output-low: true
+
+      output-high: true
+
+    patternProperties:
+      "^[a-z0-9-]+-pins$":
+        $ref: "#/$defs/pin-group"
+
+examples:
+  - |
+    pinctrl@58032800 {
+        compatible = "nsing,n32h7xx-pinctrl";
+        reg = <0x58032800 0x2c00>;
+        #address-cells = <1>;
+        #size-cells = <1>;
+
+        gpioa: gpio@58032800 {
+            reg = <0x58032800 0x400>;
+            gpio-controller;
+            #gpio-cells = <2>;
+            gpio-ranges = <&pinctrl 0 0 16>;
+        };
+
+        uart1-pins {
+            pins = "PA9", "PA10";
+            function = "usart1";
+            bias-pull-up;
+        };
+
+        sdmmc1-pins {
+            sdmmc1-ck-pins {
+                pins = "PC12";
+                function = "sdmmc1_ck";
+                bias-disable;
+                drive-strength = <1>;
+                slew-rate = <0>;
+            };
+
+            sdmmc1-data-pins {
+                pins = "PD2", "PC8", "PC9", "PC10", "PC11";
+                function = "sdmmc1";
+                bias-pull-up;
+                drive-strength = <2>;
+            };
+        };
+    };

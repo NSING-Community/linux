@@ -28,4 +28,16 @@ config ARMV7M_SYSTICK_CLOCKEVENT
 	  Select the ARMv7-M SysTick exception entry for a platform-provided
 	  clock event driver.
 
+config SERIAL_N32H7XX
+	bool "NSING N32H7xx USART serial and console support"
+	depends on TTY
+	select SERIAL_CORE
+	select SERIAL_CORE_CONSOLE
+	select SERIAL_EARLYCON
+	help
+	  Support for the NSING N32H7xx USART.  The driver lives under
+	  mach-nsing because the register block is SoC-private and is not a
+	  generic 8250/PL011-compatible UART.
+	  It provides the serial console and early boot console on USART1.
+
 endif

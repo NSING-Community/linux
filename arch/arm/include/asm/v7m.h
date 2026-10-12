@@ -92,7 +92,18 @@
 #ifndef __ASSEMBLY__
 
 enum reboot_mode;
+struct pt_regs;
 
 void armv7m_restart(enum reboot_mode mode, const char *cmd);
+
+/*
+ * Platform policy for the ARMv7-M fatal exception vectors.  See
+ * arch/arm/kernel/entry-v7m.S (__invalid_entry) and arch/arm/kernel/v7m.c
+ * for the weak default.  Returns non-zero if the fault was handled and
+ * __invalid_entry should retire the fault and defer its signal to PendSV.
+ */
+int v7m_handle_fault(struct pt_regs *regs, unsigned long exc_return,
+		     unsigned long ipsr);
+void v7m_handle_bad_frame(unsigned long exc_return, unsigned long ipsr);
 
 #endif /* __ASSEMBLY__ */

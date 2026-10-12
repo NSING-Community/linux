@@ -18,19 +18,54 @@
 #endif
 
 __invalid_entry:
+	cpsid	i
+	@ Reject unsupported/incomplete frames before dereferencing PSP/MSP.
+	mvn	r0, lr
+	cmp	r0, #14		@ 0xfffffff1: Handler/MSP
+	beq	3f
+	cmp	r0, #6		@ 0xfffffff9: Thread/MSP
+	beq	3f
+	cmp	r0, #2		@ 0xfffffffd: Thread/PSP
+	bne	4f
+3:	ldr	r0, =BASEADDR_V7M_SCB
+	ldr	r0, [r0, #0x28]	@ CFSR
+	movw	r1, #0x3838		@ stacking/unstacking/lazy-save faults
+	tst	r0, r1
+	bne	4f
 	v7m_exception_entry
-#ifdef CONFIG_PRINTK
-	adr	r0, strerr
-	mrs	r1, ipsr
-	mov	r2, lr
-	bl	_printk
-#endif
+	@ Hand the fault to the platform before doing anything else.  r0 is the
+	@ saved register frame, r1 the pre-exception EXC_RETURN (captured before
+	@ the call clobbers lr) and r2 the exception number being taken.
 	mov	r0, sp
-	bl	show_regs
-1:	b	1b
-ENDPROC(__invalid_entry)
+	mov	r1, lr
+	mrs	r2, ipsr
+	push	{r3, lr}		@ preserve EXC_RETURN across the C handler
+	bl	v7m_handle_fault
+	pop	{r3, lr}
 
-strerr:	.asciz	"\nUnhandled exception: IPSR = %08lx LR = %08lx\n"
+	@ A zero return means the fault is not recoverable.  The handler has
+	@ already reported it, so park the CPU with interrupts disabled.
+	cmp	r0, #0
+	bne	1f
+2:	b	2b
+
+	@ Retire the fault before processing its signal.  Scheduling directly
+	@ from a fault would leave that higher-priority exception active while
+	@ another task runs in SVC/PendSV context.  PendSV handles the pending
+	@ signal after exception return, just as for the IRQ exit path.
+1:
+	ldr	r1, =BASEADDR_V7M_SCB
+	mov	r0, #V7M_SCB_ICSR_PENDSVSET
+	str	r0, [r1, V7M_SCB_ICSR]
+	ldmia	sp!, {r0-r11}
+	add	sp, #PT_REGS_SIZE-S_IP
+	cpsie	i
+	bx	lr
+4:	mov	r0, lr
+	mrs	r1, ipsr
+	bl	v7m_handle_bad_frame
+5:	b	5b
+ENDPROC(__invalid_entry)
 
 	.align	2
 __irq_entry:
@@ -117,12 +152,14 @@ ENTRY(__switch_to)
 	bl	atomic_notifier_call_chain
 	mov	r0, r5
 	mov	r1, r6
+
 	ldmia	r4, {r4 - r12, lr}	@ Load all regs saved previously
 	set_current r1, r2
 	mov	sp, ip
 	bx	lr
 	.fnend
 ENDPROC(__switch_to)
+
 
 	.data
 #if CONFIG_CPU_V7M_NUM_IRQ <= 112

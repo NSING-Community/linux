@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# NSING pin controller and GPIO configuration
+#
+
+config PINCTRL_N32H7XX
+	bool "NSING N32H7xx pin controller and GPIO"
+	default ARCH_NSING
+	depends on OF && GPIOLIB && (ARCH_NSING || COMPILE_TEST)
+	select PINMUX
+	select PINCONF
+	select GENERIC_PINCONF
+	select GENERIC_PINCTRL_GROUPS
+	select GENERIC_PINMUX_FUNCTIONS
+	help
+	  Support for the pin controller and the GPIO ports built into the
+	  NSING N32H7xx SoCs.  One register block per port holds the mode,
+	  alternate-function number, pull, slew rate and drive strength of
+	  every pin together with its GPIO data register, so a single driver
+	  registers both the pin controller and the eleven GPIO banks.
+
+	  The pin/signal table is generated from the vendor function-remap
+	  database, so a board device tree names the signal it wants on a pin
+	  instead of an alternate-function number.

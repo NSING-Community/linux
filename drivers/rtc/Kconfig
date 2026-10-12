@@ -2174,4 +2174,8 @@ config RTC_DRV_HID_SENSOR_TIME
 	  If this driver is compiled as a module, it will be named
 	  rtc-hid-sensor-time.
 
+if ARCH_NSING
+source "drivers/rtc/nsing/Kconfig"
+endif
+
 endif # RTC_CLASS

@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: GPL-2.0-only
+
+config RTC_DRV_N32H7XX
+	tristate "NSING N32H7xx RTC"
+	depends on ARCH_NSING
+	depends on OF
+	select RTC_LIB
+	help
+	  Say yes to enable the backup-domain calendar/RTC of the NSING
+	  N32H7xx family.  The RTC counts the on-board 32.768 kHz LSE
+	  crystal and keeps time across a warm reset.
+
+	  If unsure, say N.

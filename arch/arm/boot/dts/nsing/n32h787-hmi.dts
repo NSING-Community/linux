@@ -175,8 +175,7 @@
 
 		/*
 		 * Partition table shared by the bootloader, this device tree and
-		 * tools/spi_image.py.  The canonical copy is
-		 * filesystem_plan.md section 2.
+		 * tools/spi_image.py: all three must agree.
 		 *
 		 * The bootloader reads the dtb and kernel partitions and passes
 		 * the DTB address to Linux in r2.  rootfs and system are only

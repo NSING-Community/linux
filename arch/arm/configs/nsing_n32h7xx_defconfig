@@ -41,17 +41,9 @@ CONFIG_BASE_SMALL=y
 # CONFIG_UID16 is not set
 CONFIG_POSIX_TIMERS=y
 # uClibc-ng NPTL routes its userspace lock waits through lll_futex_wait().
-# With futex disabled that syscall returns -ENOSYS and the lock helper falls
-# back to a bare spin, so a waiter can never sleep.  Observed on the board:
-# a process parked in the lock-helper loop with -ENOSYS in r0 and back-to-back
-# SVC instructions.  Which lock that word belongs to and why it was already
-# held are NOT established -- see diagnostics/ssh-corruption-2026-10-11/.
-# The reference config (n32h7xx-20261007 firmware/production/kernel.config)
-# also has CONFIG_FUTEX=y.
+# With futex disabled that syscall returns -ENOSYS, so a waiter cannot sleep.
 CONFIG_FUTEX=y
-# EPOLL/SIGNALFD/EVENTFD stay off for now: this build is the strict
-# single-variable A/B against #24, so only the futex syscall the uClibc lock
-# path needs is added.  Re-enabling the rest is a separate change to test.
+# EPOLL/SIGNALFD/EVENTFD stay off: they are not needed by the current userland.
 # CONFIG_EPOLL is not set
 # CONFIG_SIGNALFD is not set
 # CONFIG_EVENTFD is not set

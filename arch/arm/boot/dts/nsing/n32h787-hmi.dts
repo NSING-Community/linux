@@ -180,6 +180,13 @@
 		 * The bootloader reads the dtb and kernel partitions and passes
 		 * the DTB address to Linux in r2.  rootfs and system are only
 		 * ever reached through MTD, so the bootloader does not load them.
+		 *
+		 * All four partitions are writable at run time.  dtb and kernel
+		 * are deliberately not "read-only": that is what lets n32-flash
+		 * OTA them over the network, and it validates the image header
+		 * (zImage magic / DTB magic) before erasing anything.  A new
+		 * kernel or dtb only takes effect after a reboot, and a bad image
+		 * is recovered through the bootloader's USB MSC mode.
 		 */
 		partitions {
 			compatible = "fixed-partitions";
@@ -189,19 +196,16 @@
 			partition@0 {
 				label = "dtb";
 				reg = <0x000000 0x010000>;
-				read-only;
 			};
 
 			partition@10000 {
 				label = "kernel";
 				reg = <0x010000 0x400000>;
-				read-only;
 			};
 
 			/*
-			 * SquashFS is read-only by nature but the partition is
-			 * left writable so a new rootfs can be flashed in place
-			 * without touching kernel or system.
+			 * SquashFS is read-only by nature; the partition itself
+			 * stays writable so a new rootfs can be flashed in place.
 			 */
 			partition@410000 {
 				label = "rootfs";

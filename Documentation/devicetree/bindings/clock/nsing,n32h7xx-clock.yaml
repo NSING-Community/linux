@@ -1,0 +1,42 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/clock/nsing,n32h7xx-clock.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: NSING N32H7xx RCC console and basic timer clocks
+
+maintainers:
+  - Tobby Tan <tan.bo@nsingtech.com>
+
+description: |
+  The RCC provides the USART1 and BTIM1 clocks derived from AHB1, including
+  their run and low-power gates. Clock index 0 selects USART1 and index 1
+  selects BTIM1. Reset index 0 selects BTIM1. Other RCC resources are not
+  exposed by this binding.
+
+properties:
+  compatible:
+    const: nsing,n32h7xx-clock
+
+  reg:
+    maxItems: 1
+
+  clocks:
+    maxItems: 1
+    description: AHB1 parent clock
+
+  '#clock-cells':
+    const: 1
+
+  '#reset-cells':
+    const: 1
+
+required:
+  - compatible
+  - reg
+  - clocks
+  - '#clock-cells'
+  - '#reset-cells'
+
+additionalProperties: false

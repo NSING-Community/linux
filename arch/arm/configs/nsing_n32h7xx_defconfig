@@ -8,6 +8,15 @@ CONFIG_BLK_DEV_INITRD=y
 # carries /dev/console), which console_on_rootfs() needs before devtmpfs appears.
 CONFIG_INITRAMFS_SOURCE=""
 CONFIG_INITRAMFS_COMPRESSION_NONE=y
+# The built-in cpio is uncompressed; no external initrd is loaded.
+# CONFIG_RD_GZIP is not set
+# CONFIG_RD_BZIP2 is not set
+# CONFIG_RD_LZMA is not set
+# CONFIG_RD_XZ is not set
+# CONFIG_RD_LZO is not set
+# CONFIG_RD_LZ4 is not set
+# CONFIG_RD_ZSTD is not set
+# CONFIG_XZ_DEC is not set
 
 CONFIG_ARCH_NSING=y
 CONFIG_SOC_N32H7XX=y
@@ -18,7 +27,8 @@ CONFIG_SET_MEM_PARAM=y
 CONFIG_DRAM_BASE=0xc0000000
 CONFIG_DRAM_SIZE=0x02000000
 # CONFIG_XIP_KERNEL is not set
-CONFIG_ARM_APPENDED_DTB=y
+# The bootloader passes the separate DTB partition in r2.
+# CONFIG_ARM_APPENDED_DTB is not set
 
 CONFIG_NO_HZ_IDLE=y
 CONFIG_HIGH_RES_TIMERS=y
@@ -49,7 +59,8 @@ CONFIG_FUTEX=y
 # CONFIG_IO_URING is not set
 # CONFIG_ADVISE_SYSCALLS is not set
 
-CONFIG_BINFMT_FLAT=y
+# All shipped programs use ELF FDPIC or interpreter scripts.
+# CONFIG_BINFMT_FLAT is not set
 # CONFIG_COREDUMP is not set
 CONFIG_DEVTMPFS=y
 CONFIG_DEVTMPFS_MOUNT=y
@@ -91,6 +102,13 @@ CONFIG_GPIOLIB=y
 CONFIG_PINCTRL_N32H7XX=y
 CONFIG_GPIO_SYSFS=y
 CONFIG_GPIO_SYSFS_LEGACY=y
+
+# No PS/2, HID or other input devices are described on this board.
+# CONFIG_INPUT is not set
+# CONFIG_SERIO is not set
+# CONFIG_HID_SUPPORT is not set
+# CONFIG_MQ_IOSCHED_KYBER is not set
+# CONFIG_IOSCHED_BFQ is not set
 
 CONFIG_MTD=y
 CONFIG_MTD_BLOCK=y

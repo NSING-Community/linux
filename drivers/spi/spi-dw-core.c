@@ -9,6 +9,7 @@
 #include <linux/bitops.h>
 #include <linux/dma-mapping.h>
 #include <linux/interrupt.h>
+#include <linux/iopoll.h>
 #include <linux/module.h>
 #include <linux/preempt.h>
 #include <linux/highmem.h>
@@ -429,7 +430,7 @@ static void dw_spi_irq_setup(struct dw_spi *dws)
 	dw_spi_umask_intr(dws, imask);
 }
 
-static void dw_spi_enh_irq_setup(struct dw_spi *dws)
+static void dw_spi_enh_irq_setup(struct dw_spi *dws, bool poll)
 {
 	u16 level;
 	u8 imask;
@@ -453,7 +454,8 @@ static void dw_spi_enh_irq_setup(struct dw_spi *dws)
 	dws->transfer_handler = dw_spi_enh_handler;
 
 	imask = DW_SPI_INT_TXEI | DW_SPI_INT_RXFI;
-	dw_spi_umask_intr(dws, imask);
+	if (!poll)
+		dw_spi_umask_intr(dws, imask);
 }
 
 /*
@@ -588,7 +590,7 @@ static int dw_spi_adjust_mem_op_size(struct spi_mem *mem, struct spi_mem_op *op)
 	return 0;
 }
 
-static bool dw_spi_supports_enh_mem_op(struct spi_mem *mem,
+bool dw_spi_supports_enh_mem_op(struct spi_mem *mem,
 				       const struct spi_mem_op *op)
 {
 	struct dw_spi *dws = spi_controller_get_devdata(mem->spi->controller);
@@ -622,6 +624,7 @@ static bool dw_spi_supports_enh_mem_op(struct spi_mem *mem,
 
 	return spi_mem_default_supports_op(mem, op);
 }
+EXPORT_SYMBOL_NS_GPL(dw_spi_supports_enh_mem_op, "SPI_DW_CORE");
 
 static bool dw_spi_supports_mem_op(struct spi_mem *mem,
 				   const struct spi_mem_op *op)
@@ -761,6 +764,9 @@ static int dw_spi_wait_mem_op_done(struct dw_spi *dws)
 	unsigned long ns, us;
 	u32 nents;
 
+	if (dws->wait_mem_op_done)
+		return dws->wait_mem_op_done(dws);
+
 	nents = dw_readl(dws, DW_SPI_TXFLR);
 	ns = NSEC_PER_SEC / dws->current_freq * nents;
 	ns *= dws->n_bytes * BITS_PER_BYTE;
@@ -799,7 +805,7 @@ static void dw_spi_stop_mem_op(struct dw_spi *dws, struct spi_device *spi)
  * SPI-mem core calls exec_op() callback only if the GPIO-based CS is
  * unavailable.
  */
-static int dw_spi_exec_mem_op(struct spi_mem *mem, const struct spi_mem_op *op)
+int dw_spi_exec_mem_op(struct spi_mem *mem, const struct spi_mem_op *op)
 {
 	struct dw_spi *dws = spi_controller_get_devdata(mem->spi->controller);
 	struct dw_spi_cfg cfg = {0};
@@ -825,6 +831,8 @@ static int dw_spi_exec_mem_op(struct spi_mem *mem, const struct spi_mem_op *op)
 		cfg.ndf = op->data.nbytes;
 	} else {
 		cfg.tmode = DW_SPI_CTRLR0_TMOD_TO;
+		if (dws->caps & DW_SPI_CAP_TXONLY_NDF)
+			cfg.ndf = dws->tx_len;
 	}
 
 	dw_spi_enable_chip(dws, 0);
@@ -890,13 +898,19 @@ static int dw_spi_exec_mem_op(struct spi_mem *mem, const struct spi_mem_op *op)
 
 	return ret;
 }
+EXPORT_SYMBOL_NS_GPL(dw_spi_exec_mem_op, "SPI_DW_CORE");
 
 static void dw_spi_init_enh_mem_buf(struct dw_spi *dws, const struct spi_mem_op *op)
 {
 	dws->n_bytes = 1;
 	if (op->data.dir == SPI_MEM_DATA_IN) {
+		if ((dws->caps & DW_SPI_CAP_MEM_RX32) &&
+		    (dws->caps & DW_SPI_CAP_DFS32) && op->data.buswidth > 1 &&
+		    IS_ALIGNED(op->data.nbytes, 4) &&
+		    IS_ALIGNED((uintptr_t)op->data.buf.in, 4))
+			dws->n_bytes = 4;
 		dws->rx = op->data.buf.in;
-		dws->rx_len = op->data.nbytes;
+		dws->rx_len = op->data.nbytes / dws->n_bytes;
 		dws->tx = NULL;
 		dws->tx_len = 0;
 	} else if (op->data.dir == SPI_MEM_DATA_OUT) {
@@ -939,13 +953,25 @@ static void dw_spi_enh_write_cmd_addr(struct dw_spi *dws, const struct spi_mem_o
 	}
 }
 
-static int dw_spi_exec_enh_mem_op(struct spi_mem *mem, const struct spi_mem_op *op)
+static int dw_spi_poll_mem_read(struct dw_spi *dws)
+{
+	int ret = dw_spi_check_status(dws, true);
+
+	if (ret)
+		return ret;
+	dw_reader(dws);
+	return dws->rx_len;
+}
+
+int dw_spi_exec_enh_mem_op(struct spi_mem *mem, const struct spi_mem_op *op)
 {
 	struct spi_controller *ctlr = mem->spi->controller;
 	struct dw_spi *dws = spi_controller_get_devdata(ctlr);
 	struct dw_spi_enh_cfg enh_cfg = {0};
 	struct dw_spi_cfg cfg = {0};
 	unsigned long long ms;
+	bool poll = (dws->caps & DW_SPI_CAP_MEM_POLL) &&
+		    op->data.dir == SPI_MEM_DATA_IN;
 	int ret;
 
 	switch (op->data.buswidth) {
@@ -968,9 +994,9 @@ static int dw_spi_exec_enh_mem_op(struct spi_mem *mem, const struct spi_mem_op *
 
 	dw_spi_init_enh_mem_buf(dws, op);
 
-	cfg.dfs = 8;
+	cfg.dfs = BITS_PER_BYTE * dws->n_bytes;
 	cfg.freq = clamp(op->max_freq, 0U, dws->max_mem_freq);
-	cfg.ndf = op->data.nbytes;
+	cfg.ndf = op->data.nbytes / dws->n_bytes;
 	if (op->data.dir == SPI_MEM_DATA_IN)
 		cfg.tmode = DW_SPI_CTRLR0_TMOD_RO;
 	else
@@ -1020,11 +1046,10 @@ static int dw_spi_exec_enh_mem_op(struct spi_mem *mem, const struct spi_mem_op *
 	 * Keeping it as a safeguard based on practical validation.
 	 */
 	udelay(5);
-
-	dw_spi_enh_irq_setup(dws);
+	dw_spi_enh_irq_setup(dws, poll);
 
 	/* Use timeout calculation from spi_transfer_wait() */
-	ms = 8LL * MSEC_PER_SEC * (dws->rx_len ? dws->rx_len : dws->tx_len);
+	ms = 8LL * MSEC_PER_SEC * op->data.nbytes;
 	do_div(ms, dws->current_freq);
 
 	/*
@@ -1034,6 +1059,19 @@ static int dw_spi_exec_enh_mem_op(struct spi_mem *mem, const struct spi_mem_op *
 	ms += ms + 200;
 	if (ms > UINT_MAX)
 		ms = UINT_MAX;
+
+	if (poll) {
+		int left;
+
+		/* Native CS and clock stretching allow interrupts during polling. */
+		ret = read_poll_timeout(dw_spi_poll_mem_read, left, left <= 0,
+					0, ms * USEC_PER_MSEC, false, dws);
+		if (!ret)
+			ret = left;
+		if (ret)
+			goto stop;
+		goto wait_done;
+	}
 
 	ms = wait_for_completion_timeout(&ctlr->xfer_completion,
 					 msecs_to_jiffies(ms));
@@ -1048,12 +1086,22 @@ static int dw_spi_exec_enh_mem_op(struct spi_mem *mem, const struct spi_mem_op *
 		return -EIO;
 	}
 
+wait_done:
 	ret = dw_spi_wait_mem_op_done(dws);
-
+stop:
 	dw_spi_stop_mem_op(dws, mem->spi);
+	if (!ret && dws->n_bytes == 4) {
+		u32 *buf = op->data.buf.in;
+		u32 i;
+
+		/* SPI shifts the most significant byte of each frame first. */
+		for (i = 0; i < op->data.nbytes / sizeof(*buf); i++)
+			cpu_to_be32s(&buf[i]);
+	}
 
 	return ret;
 }
+EXPORT_SYMBOL_NS_GPL(dw_spi_exec_enh_mem_op, "SPI_DW_CORE");
 
 static bool dw_spi_can_use_mem_ops(struct dw_spi *dws)
 {
@@ -1274,7 +1322,8 @@ static void dw_spi_hw_init(struct device *dev, struct dw_spi *dws)
 
 	dws->ctlr->mode_bits |= SPI_CPOL | SPI_CPHA;
 
-	if (!spi_controller_is_target(dws->ctlr) && dw_spi_can_use_mem_ops(dws))
+	if (!spi_controller_is_target(dws->ctlr) &&
+	    (dw_spi_can_use_mem_ops(dws) || (dws->caps & DW_SPI_CAP_EMODE)))
 		dws->ctlr->mode_bits |= detect_enh_mode(dws);
 
 	/* enable HW fixup for explicit CS deselect for Amazon's alpine chip */

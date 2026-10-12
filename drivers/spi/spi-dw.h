@@ -36,6 +36,11 @@
 #define DW_SPI_CAP_CS_OVERRIDE		BIT(0)
 #define DW_SPI_CAP_DFS32		BIT(1)
 #define DW_SPI_CAP_EMODE		BIT(2)
+/* Enhanced reads may pack four wire bytes into each FIFO entry. */
+#define DW_SPI_CAP_MEM_RX32	BIT(3)
+#define DW_SPI_CAP_MEM_POLL	BIT(4)
+/* Transmit-only memory operations require an explicit frame count. */
+#define DW_SPI_CAP_TXONLY_NDF	BIT(5)
 
 /* Register offsets (Generic for both DWC APB SSI and DWC SSI IP-cores) */
 #define DW_SPI_CTRLR0			0x00
@@ -221,6 +226,7 @@ struct dw_spi {
 
 	/* Custom memory operations */
 	struct spi_controller_mem_ops mem_ops;
+	int (*wait_mem_op_done)(struct dw_spi *dws);
 
 	/* DMA info */
 	struct dma_chan		*txchan;
@@ -340,6 +346,10 @@ extern void dw_spi_set_cs(struct spi_device *spi, bool enable);
 extern void dw_spi_update_config(struct dw_spi *dws, struct spi_device *spi,
 				 struct dw_spi_cfg *cfg, struct dw_spi_enh_cfg *enh_cfg);
 extern int dw_spi_check_status(struct dw_spi *dws, bool raw);
+extern int dw_spi_exec_mem_op(struct spi_mem *mem, const struct spi_mem_op *op);
+extern bool dw_spi_supports_enh_mem_op(struct spi_mem *mem,
+				     const struct spi_mem_op *op);
+extern int dw_spi_exec_enh_mem_op(struct spi_mem *mem, const struct spi_mem_op *op);
 extern int dw_spi_add_controller(struct device *dev, struct dw_spi *dws);
 extern void dw_spi_remove_controller(struct dw_spi *dws);
 extern int dw_spi_suspend_controller(struct dw_spi *dws);

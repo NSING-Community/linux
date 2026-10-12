@@ -1,0 +1,231 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+#include "../armv7-m.dtsi"
+
+/ {
+	#address-cells = <1>;
+	#size-cells = <1>;
+
+	clocks {
+		clk_ahb1: clock-ahb1 {
+			compatible = "fixed-clock";
+			#clock-cells = <0>;
+			clock-frequency = <300000000>;
+		};
+
+		/*
+		 * AHB2 runs at 300 MHz on the N32H787 and is the CSR clock
+		 * (the "hclk" the MAC uses for MDIO and its register block).
+		 */
+		clk_ahb2: clock-ahb2 {
+			compatible = "fixed-clock";
+			#clock-cells = <0>;
+			clock-frequency = <300000000>;
+		};
+
+		/* ETH1 PTP uses the sysbus clock divided by two. */
+		clk_eth1_ptp: clock-eth1-ptp {
+			compatible = "fixed-factor-clock";
+			clocks = <&clk_ahb2>;
+			#clock-cells = <0>;
+			clock-mult = <1>;
+			clock-div = <2>;
+		};
+
+		/*
+		 * The XSPI SSI input is the AXI bus clock, which the bootloader
+		 * leaves at PLL1A/2 = 300 MHz.
+		 */
+		clk_axi: clock-axi {
+			compatible = "fixed-clock";
+			#clock-cells = <0>;
+			clock-frequency = <300000000>;
+		};
+	};
+
+	soc {
+		rcc: clock-controller@58030000 {
+			compatible = "nsing,n32h7xx-clock";
+			reg = <0x58030000 0x400>;
+			#clock-cells = <1>;
+			#reset-cells = <1>;
+			clocks = <&clk_ahb1>;
+		};
+
+		/*
+		 * The pin controller and the GPIO ports are one piece of
+		 * hardware: every pin has a single register block that selects
+		 * its mode and alternate function and holds its GPIO data
+		 * register.  One driver registers both, and each port is a
+		 * child node with its own GPIO bank.  Pin groups are described
+		 * by the board under this node.
+		 */
+		pinctrl: pinctrl@58032800 {
+			compatible = "nsing,n32h7xx-pinctrl";
+			reg = <0x58032800 0x2c00>;
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			gpioa: gpio@58032800 {
+				reg = <0x58032800 0x400>;
+				gpio-controller;
+				#gpio-cells = <2>;
+				gpio-ranges = <&pinctrl 0 0 16>;
+			};
+
+			gpiob: gpio@58032c00 {
+				reg = <0x58032c00 0x400>;
+				gpio-controller;
+				#gpio-cells = <2>;
+				gpio-ranges = <&pinctrl 0 16 16>;
+			};
+
+			gpioc: gpio@58033000 {
+				reg = <0x58033000 0x400>;
+				gpio-controller;
+				#gpio-cells = <2>;
+				gpio-ranges = <&pinctrl 0 32 16>;
+			};
+
+			gpiod: gpio@58033400 {
+				reg = <0x58033400 0x400>;
+				gpio-controller;
+				#gpio-cells = <2>;
+				gpio-ranges = <&pinctrl 0 48 16>;
+			};
+
+			gpioe: gpio@58033800 {
+				reg = <0x58033800 0x400>;
+				gpio-controller;
+				#gpio-cells = <2>;
+				gpio-ranges = <&pinctrl 0 64 16>;
+			};
+
+			gpiof: gpio@58033c00 {
+				reg = <0x58033c00 0x400>;
+				gpio-controller;
+				#gpio-cells = <2>;
+				gpio-ranges = <&pinctrl 0 80 16>;
+			};
+
+			gpiog: gpio@58034000 {
+				reg = <0x58034000 0x400>;
+				gpio-controller;
+				#gpio-cells = <2>;
+				gpio-ranges = <&pinctrl 0 96 16>;
+			};
+
+			gpioh: gpio@58034400 {
+				reg = <0x58034400 0x400>;
+				gpio-controller;
+				#gpio-cells = <2>;
+				gpio-ranges = <&pinctrl 0 112 16>;
+			};
+
+			gpioi: gpio@58034800 {
+				reg = <0x58034800 0x400>;
+				gpio-controller;
+				#gpio-cells = <2>;
+				gpio-ranges = <&pinctrl 0 128 16>;
+			};
+
+			gpioj: gpio@58034c00 {
+				reg = <0x58034c00 0x400>;
+				gpio-controller;
+				#gpio-cells = <2>;
+				gpio-ranges = <&pinctrl 0 144 16>;
+			};
+
+			gpiok: gpio@58035000 {
+				reg = <0x58035000 0x400>;
+				gpio-controller;
+				#gpio-cells = <2>;
+				gpio-ranges = <&pinctrl 0 160 16>;
+			};
+		};
+
+		btim1: timer@4000a000 {
+			compatible = "nsing,n32h7xx-btim";
+			reg = <0x4000a000 0x400>;
+			clocks = <&rcc 1>;
+			resets = <&rcc 0>;
+		};
+
+		usart1: serial@4000c400 {
+			compatible = "nsing,n32h7xx-usart";
+			reg = <0x4000c400 0x400>;
+			interrupts = <116>;
+			clocks = <&rcc 0>;
+			clock-names = "usart";
+			current-speed = <115200>;
+			clock-frequency = <300000000>;
+			reg-io-width = <4>;
+			status = "disabled";
+		};
+
+		/*
+		 * ETH1 is the on-chip 10/100 Ethernet MAC.  Its MAC, MTL and
+		 * DMA blocks are programmed by drivers/net/ethernet/nsing; the
+		 * mach-nsing code owns the clock gates, reset, ETH1 PHY
+		 * interface select and pin muxing.
+		 */
+		eth1: ethernet@400f4000 {
+			compatible = "nsing,n32h7xx-eth";
+			reg = <0x400f4000 0x2000>;
+			interrupts = <104>;
+			clocks = <&clk_ahb2>, <&clk_eth1_ptp>;
+			clock-names = "csr", "ptp_ref";
+			status = "disabled";
+		};
+
+		/*
+		 * XSPI2 drives the on-board serial NOR flash.  The controller
+		 * is only ever used through the spi-mem interface, so the node
+		 * carries a single flash child rather than a set of chip
+		 * selects.
+		 */
+		xspi2: spi@51101000 {
+			compatible = "nsing,n32h7xx-xspi";
+			reg = <0x51101000 0x400>;
+			interrupts = <83>;
+			clocks = <&clk_axi>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
+		};
+
+		/*
+		 * SDMMC1 is a standard SDHCI host with an NSING wrapper in
+		 * front of it.  The wrapper holds the NSING-specific block
+		 * length, clock and tuning capability registers.
+		 */
+		sdmmc1: mmc@51110000 {
+			compatible = "nsing,n32h7xx-sdhci";
+			reg = <0x51110000 0x100>,
+			      <0x51107000 0x100>;
+			reg-names = "host", "wrapper";
+			interrupts = <135>;
+			status = "disabled";
+		};
+
+		/*
+		 * The RTC is the backup-domain calendar counter clocked from
+		 * the on-board 32.768 kHz LSE crystal.  Both the oscillator and
+		 * the RTC clock select are RCC/PWR bits rather than a
+		 * discoverable clock, so mach-nsing brings them up from this
+		 * node's probe and there is nothing to put in "clocks" yet.
+		 */
+		rtc: rtc@58005400 {
+			compatible = "nsing,n32h7xx-rtc";
+			/* APB5PERIPH_BASE + 0x5400, not the AHB5 window. */
+			reg = <0x58005400 0x100>;
+			status = "disabled";
+		};
+	};
+};
+
+&systick {
+	compatible = "nsing,n32h7xx-systick";
+	clock-frequency = <600000000>;
+	status = "okay";
+};

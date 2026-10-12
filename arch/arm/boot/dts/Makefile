@@ -23,6 +23,7 @@ subdir-y += moxa
 subdir-y += nspire
 subdir-y += nuvoton
 subdir-y += nvidia
+subdir-y += nsing
 subdir-y += nxp
 subdir-y += qcom
 subdir-y += realtek

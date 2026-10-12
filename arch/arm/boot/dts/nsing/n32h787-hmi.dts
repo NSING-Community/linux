@@ -1,0 +1,257 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+/dts-v1/;
+
+#include <dt-bindings/gpio/gpio.h>
+#include "n32h7xx.dtsi"
+
+/ {
+	model = "NSING N32H787 HMI";
+	compatible = "nsing,n32h787-hmi", "nsing,n32h787", "nsing,n32h7xx";
+
+	chosen {
+		/*
+		 * The kernel carries no userland of its own any more; the root
+		 * filesystem is the SquashFS image in the "rootfs" MTD partition
+		 * (mtd2).  rootwait covers the SPI NOR probe finishing after the
+		 * console is up.  mtdblock2 is used rather than mtd2 because the
+		 * kernel needs a block device to mount a filesystem from.
+		 */
+		bootargs =
+			"earlycon console=ttyS0,115200 root=/dev/mtdblock2 rootfstype=squashfs ro rootwait";
+		stdout-path = &usart1;
+	};
+
+	aliases {
+		serial0 = &usart1;
+	};
+
+	/* The bootloader loads the raw zImage+DTB at the start of the 32 MiB
+	 * SDRAM window and jumps to that base address.
+	 */
+	memory@c0000000 {
+		device_type = "memory";
+		reg = <0xc0000000 0x02000000>;
+	};
+
+	/*
+	 * The SoC has no IOMMU and this kernel runs without an MMU, so
+	 * dma_alloc_coherent() can only succeed if a pool is reserved up
+	 * front (CONFIG_DMA_GLOBAL_POOL).  One pool backs every on-chip
+	 * DMA master: ETH, SDMMC and USB.
+	 */
+	reserved-memory {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+
+		dma_pool: dma-pool@c1f80000 {
+			compatible = "shared-dma-pool";
+			reg = <0xc1f80000 0x00080000>;
+			no-map;
+			linux,dma-default;
+		};
+
+		eth_dma_pool: dma-pool@24000000 {
+			compatible = "shared-dma-pool";
+			reg = <0x24000000 0x00040000>;
+			no-map;
+		};
+	};
+};
+
+/*
+ * Pin groups.  The pin controller resolves the signal name of each pin to the
+ * alternate-function number that routes it, so a group reads as the wiring it
+ * describes.  "function" is either a peripheral name, which picks whichever
+ * signal that peripheral has on each pin, or an exact signal name.
+ */
+&pinctrl {
+	usart1_pins: usart1-pins {
+		pins = "PA9", "PA10";
+		function = "usart1";
+		bias-pull-up;
+	};
+
+	eth1_pins: eth1-pins {
+		pins = "PA1", "PA2", "PA7", "PC1", "PC4", "PC5",
+		       "PB11", "PG13", "PG14";
+		function = "eth1";
+		bias-disable;
+	};
+
+	xspi2_pins: xspi2-pins {
+		pins = "PG12", "PB2", "PB0", "PF8", "PF7", "PF6";
+		function = "xspi2";
+		bias-disable;
+		drive-strength = <3>;
+		slew-rate = <0>;
+	};
+
+	sdmmc1_pins: sdmmc1-pins {
+		sdmmc1-ck-pins {
+			pins = "PC12";
+			function = "sdmmc1_ck";
+			bias-disable;
+			drive-strength = <1>;
+			slew-rate = <0>;
+		};
+
+		sdmmc1-data-pins {
+			pins = "PD2", "PC8", "PC9", "PC10", "PC11";
+			function = "sdmmc1";
+			bias-pull-up;
+			drive-strength = <2>;
+			slew-rate = <0>;
+		};
+	};
+};
+
+&usart1 {
+	status = "okay";
+
+	/*
+	 * PA9 is USART1_TX and PA10 is USART1_RX.  The pin controller knows
+	 * which alternate function of this SoC carries each signal, so the
+	 * board only has to say which signal it wants on which pin.
+	 */
+	pinctrl-names = "default";
+	pinctrl-0 = <&usart1_pins>;
+};
+
+&eth1 {
+	status = "okay";
+	memory-region = <&eth_dma_pool>;
+
+	/*
+	 * RMII to the on-board JL1111B PHY (U6, MDIO address 1).  The PHY
+	 * drives the 50 MHz RMII reference clock back onto ETH_REFCLK/PA1,
+	 * so the MAC is a REF_CLK consumer; there is no GTX_CLK to generate.
+	 * The JL1111 page-7 RMII setup register is programmed by the PHY
+	 * driver to make the PHY the clock source.
+	 */
+	phy-mode = "rmii";
+	phy-handle = <&phy0>;
+
+	/*
+	 * RMII pin group: PA1 reference clock, PA2 MDIO, PA7 CRS_DV, PC1 MDC,
+	 * PC4/PC5 RXD0/RXD1, PB11 TX_EN and PG13/PG14 TXD0/TXD1.
+	 */
+	pinctrl-names = "default";
+	pinctrl-0 = <&eth1_pins>;
+
+	/* The PHY reset line is PB1 and it is active low. */
+	phy-reset-gpios = <&gpiob 1 GPIO_ACTIVE_LOW>;
+	phy-reset-duration = <20>;
+
+	mdio {
+		#address-cells = <1>;
+		#size-cells = <0>;
+		compatible = "nsing,n32h7xx-mdio";
+
+		phy0: ethernet-phy@1 {
+			reg = <0x1>;
+		};
+	};
+};
+
+&xspi2 {
+	status = "okay";
+
+	/*
+	 * W25Q128 on XSPI2: single-line commands and Quad I/O reads.
+	 */
+	pinctrl-names = "default";
+	pinctrl-0 = <&xspi2_pins>;
+
+	rx-sample-delay-ns = <10>;
+
+	flash@0 {
+		compatible = "jedec,spi-nor";
+		reg = <0>;
+		spi-max-frequency = <75000000>;
+		spi-tx-bus-width = <1>;
+		spi-rx-bus-width = <4>;
+
+		/*
+		 * Partition table shared by the bootloader, this device tree and
+		 * tools/spi_image.py.  The canonical copy is
+		 * filesystem_plan.md section 2.
+		 *
+		 * The bootloader reads the dtb and kernel partitions and passes
+		 * the DTB address to Linux in r2.  rootfs and system are only
+		 * ever reached through MTD, so the bootloader does not load them.
+		 */
+		partitions {
+			compatible = "fixed-partitions";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			partition@0 {
+				label = "dtb";
+				reg = <0x000000 0x010000>;
+				read-only;
+			};
+
+			partition@10000 {
+				label = "kernel";
+				reg = <0x010000 0x400000>;
+				read-only;
+			};
+
+			/*
+			 * SquashFS is read-only by nature but the partition is
+			 * left writable so a new rootfs can be flashed in place
+			 * without touching kernel or system.
+			 */
+			partition@410000 {
+				label = "rootfs";
+				reg = <0x410000 0x300000>;
+			};
+
+			/*
+			 * Size 0 means "up to the end of the flash", so system
+			 * absorbs whatever the board's NOR part provides instead
+			 * of pinning the layout to one device size.
+			 */
+			partition@710000 {
+				label = "system";
+				reg = <0x710000 0x000000>;
+			};
+		};
+	};
+};
+
+&sdmmc1 {
+	status = "okay";
+	bus-width = <4>;
+	no-1-8-v;
+	no-sdio;
+	no-mmc;
+	broken-cd;
+	disable-wp;
+	/* PLL2A at 100 MHz permits the standard SD high-speed 50 MHz bus. */
+	max-frequency = <50000000>;
+
+	/* Fast edges on all six SD signals.  The drive-strength encoding in
+	 * the pin group gives PC12 8 mA; encoding 2 gives PD2/PC9-PC11
+	 * 4 mA and the 5 V tolerant PC8 pad 2 mA, matching the bootloader.
+	 *
+	 * SDMMC1 is wired to the on-board microSD slot:
+	 *   PC12 CK, PD2 CMD, PC8 D0, PC9 D1, PC10 D2, PC11 D3.
+	 *
+	 * CMD and DAT lines need pull-ups; CK is driven by the controller.
+	 */
+	pinctrl-names = "default";
+	pinctrl-0 = <&sdmmc1_pins>;
+};
+
+/*
+ * The RTC has no VBAT battery on this board: the backup domain is fed from
+ * VDD, so a power cycle loses the time and a warm reset keeps it.  There is
+ * nothing to configure in the device tree -- the calendar itself is set from
+ * userspace once NTP has stepped the system clock.
+ */
+&rtc {
+	status = "okay";
+};

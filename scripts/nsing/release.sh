@@ -14,7 +14,7 @@ srctree=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 #   BUILD_DIR     kbuild out-of-tree object tree ($O).  Defaults to an in-tree
 #                 build, which is only meant for a standalone kernel checkout.
 #   STAGE_DIR     directory that receives the staged boot artifacts: zImage,
-#                 <board>.dtb, zImage+dtb, System.map, config, SHA256SUMS.
+#                 <board>.dtb, System.map, config, SHA256SUMS.
 #
 #   DEFCONFIG     seed configuration: a name under arch/$ARCH/configs/ or a
 #                 path.  It only *seeds* $BUILD_DIR/.config; a configuration
@@ -55,7 +55,7 @@ mkdir -p "$outdir"
 # Clear only the files we stage.  In the combined project STAGE_DIR is
 # out/kernel, which also holds the out-of-tree build tree in out/kernel/build,
 # so this must never be a blanket removal.
-for staged in zImage "$BOARD.dtb" zImage+dtb System.map config SHA256SUMS; do
+for staged in zImage "$BOARD.dtb" System.map config SHA256SUMS; do
 	rm -f "$outdir/$staged"
 done
 
@@ -75,7 +75,6 @@ test -s "$dtb"
 
 cp "$image" "$outdir/zImage"
 cp "$dtb" "$outdir/$BOARD.dtb"
-cat "$image" "$dtb" >"$outdir/zImage+dtb"
 if [ "$BUILD_DIR" != "$srctree" ]; then
 	cp "$BUILD_DIR/System.map" "$outdir/System.map"
 	cp "$BUILD_DIR/.config" "$outdir/config"
@@ -84,7 +83,7 @@ else
 	cp "$srctree/.config" "$outdir/config"
 fi
 
-(cd "$outdir" && sha256sum zImage "$BOARD.dtb" zImage+dtb \
+(cd "$outdir" && sha256sum zImage "$BOARD.dtb" \
 	System.map config > SHA256SUMS)
 
 # The version is only reported, never used to build a path.
@@ -92,4 +91,3 @@ printf 'kernel:  %s\n' "$(make -s -C "$srctree" $make_args kernelrelease)"
 printf 'stage:   %s\n' "$outdir"
 printf 'zImage:  %s (%s bytes)\n' "$outdir/zImage" "$(wc -c <"$outdir/zImage")"
 printf 'dtb:     %s (%s bytes)\n' "$outdir/$BOARD.dtb" "$(wc -c <"$outdir/$BOARD.dtb")"
-printf 'legacy:  %s\n' "$outdir/zImage+dtb"

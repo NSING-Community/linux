@@ -98,6 +98,12 @@ SYM_FUNC_END(cpu_cm7_proc_fin)
 
 __v7m_cm7_setup:
 	mov	r8, #(V7M_SCB_CCR_DC | V7M_SCB_CCR_IC| V7M_SCB_CCR_BP)
+#ifdef CONFIG_CPU_DCACHE_DISABLE
+	bic	r8, r8, #V7M_SCB_CCR_DC
+#endif
+#ifdef CONFIG_CPU_ICACHE_DISABLE
+	bic	r8, r8, #V7M_SCB_CCR_IC
+#endif
 	b	__v7m_setup_cont
 /*
  *	__v7m_setup

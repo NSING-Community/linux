@@ -59,6 +59,10 @@ int main(void)
   DEFINE(VFP_CPU,		offsetof(union vfp_state, hard.cpu));
 #endif
 #endif
+#ifdef CONFIG_CPU_V7M_FPU
+	DEFINE(TI_V7M_FPU,		offsetof(struct thread_info, v7m_fpu));
+	DEFINE(V7M_FPU_FPSCR,		offsetof(struct v7m_fpu_state, fpscr));
+#endif
   DEFINE(SOFTIRQ_DISABLE_OFFSET,SOFTIRQ_DISABLE_OFFSET);
 #ifdef CONFIG_ARM_THUMBEE
   DEFINE(TI_THUMBEE_STATE,	offsetof(struct thread_info, thumbee_state));

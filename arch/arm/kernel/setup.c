@@ -59,6 +59,9 @@
 #include <asm/unwind.h>
 #include <asm/memblock.h>
 #include <asm/virt.h>
+#ifdef CONFIG_CPU_V7M_FPU
+#include <asm/v7m.h>
+#endif
 #include <asm/kasan.h>
 
 #include "atags.h"
@@ -725,6 +728,10 @@ static void __init setup_processor(void)
 	snprintf(elf_platform, ELF_PLATFORM_SIZE, "%s%c",
 		 list->elf_name, ENDIANNESS);
 	elf_hwcap = list->elf_hwcap;
+
+#ifdef CONFIG_CPU_V7M_FPU
+	v7m_fpu_init();
+#endif
 
 	cpuid_init_hwcaps();
 	patch_aeabi_idiv();

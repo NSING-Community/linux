@@ -30,6 +30,18 @@
 #define V7M_SCB_CCR_IC				(1 << 17)
 #define V7M_SCB_CCR_BP				(1 << 18)
 
+#define V7M_SCB_CPACR			0x88
+#define V7M_SCB_CPACR_CP10_CP11_FULL	(0xf << 20)
+
+/* Floating-point Context Control Register. */
+#define V7M_SCB_FPCCR			0x234
+#define V7M_SCB_FPCCR_LSPEN			(1 << 30)
+#define V7M_SCB_FPCCR_ASPEN			(1 << 31)
+#define V7M_SCB_MVFR0			0x240
+#define V7M_SCB_MVFR1			0x244
+#define V7M_MVFR0_FP_MASK			0xfff
+#define V7M_MVFR0_D16_SP_DP		0x221
+
 #define V7M_SCB_SHPR2			0x1c
 #define V7M_SCB_SHPR3			0x20
 
@@ -95,6 +107,9 @@ enum reboot_mode;
 struct pt_regs;
 
 void armv7m_restart(enum reboot_mode mode, const char *cmd);
+#ifdef CONFIG_CPU_V7M_FPU
+void v7m_fpu_init(void);
+#endif
 
 /*
  * Platform policy for the ARMv7-M fatal exception vectors.  See

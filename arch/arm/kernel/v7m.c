@@ -3,12 +3,32 @@
  * Copyright (C) 2013 Uwe Kleine-Koenig for Pengutronix
  */
 #include <linux/io.h>
+#include <linux/init.h>
 #include <linux/ptrace.h>
 #include <linux/reboot.h>
 #include <linux/sched/debug.h>
 #include <asm/barrier.h>
+#include <asm/elf.h>
 #include <asm/v7m.h>
 
+#ifdef CONFIG_CPU_V7M_FPU
+void __init v7m_fpu_init(void)
+{
+	u32 mvfr0 = readl(BASEADDR_V7M_SCB + V7M_SCB_MVFR0);
+	u32 mvfr1 = readl(BASEADDR_V7M_SCB + V7M_SCB_MVFR1);
+	u32 cpacr = readl(BASEADDR_V7M_SCB + V7M_SCB_CPACR);
+
+	if ((mvfr0 & V7M_MVFR0_FP_MASK) != V7M_MVFR0_D16_SP_DP ||
+	    (cpacr & V7M_SCB_CPACR_CP10_CP11_FULL) !=
+	    V7M_SCB_CPACR_CP10_CP11_FULL)
+		panic("CPU_V7M_FPU requires accessible D16 single/double precision FPU (MVFR0=%#x CPACR=%#x)",
+		      mvfr0, cpacr);
+
+	elf_hwcap |= HWCAP_VFP | HWCAP_VFPv3 | HWCAP_VFPv3D16;
+	if (((mvfr1 >> 28) & 0xf) == 1)
+		elf_hwcap |= HWCAP_VFPv4;
+}
+#endif
 
 void armv7m_restart(enum reboot_mode mode, const char *cmd)
 {

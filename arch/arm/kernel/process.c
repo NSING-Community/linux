@@ -224,6 +224,12 @@ void flush_thread(void)
 
 	memset(&tsk->thread.debug, 0, sizeof(struct debug_info));
 	memset(&thread->fpstate, 0, sizeof(union fp_state));
+#ifdef CONFIG_CPU_V7M_FPU
+	preempt_disable();
+	memset(&thread->v7m_fpu, 0, sizeof(thread->v7m_fpu));
+	v7m_fpu_restore_state(&thread->v7m_fpu);
+	preempt_enable();
+#endif
 
 	flush_tls();
 
@@ -253,11 +259,18 @@ int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
 #endif
 
 	if (likely(!args->fn)) {
+#ifdef CONFIG_CPU_V7M_FPU
+		/* The parent's cached state may predate its last user FP write. */
+		v7m_fpu_save_state(&thread->v7m_fpu);
+#endif
 		*childregs = *current_pt_regs();
 		childregs->ARM_r0 = 0;
 		if (stack_start)
 			childregs->ARM_sp = stack_start;
 	} else {
+#ifdef CONFIG_CPU_V7M_FPU
+		memset(&thread->v7m_fpu, 0, sizeof(thread->v7m_fpu));
+#endif
 		memset(childregs, 0, sizeof(struct pt_regs));
 		thread->cpu_context.r4 = (unsigned long)args->fn_arg;
 		thread->cpu_context.r5 = (unsigned long)args->fn;

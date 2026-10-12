@@ -35,6 +35,9 @@ obj-$(CONFIG_DEPRECATED_PARAM_STRUCT) += atags_compat.o
 
 ifeq ($(CONFIG_CPU_V7M),y)
 obj-y		+= entry-v7m.o v7m.o
+ifeq ($(CONFIG_CPU_V7M_FPU),y)
+AFLAGS_entry-v7m.o += -mfpu=fpv5-d16
+endif
 else
 obj-y		+= entry-armv.o
 endif

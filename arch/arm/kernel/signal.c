@@ -19,6 +19,7 @@
 #include <asm/unistd.h>
 #include <asm/vfp.h>
 #include <asm/syscalls.h>
+#include <asm/thread_info.h>
 
 #include "signal.h"
 
@@ -95,6 +96,43 @@ static int restore_iwmmxt_context(char __user **auxp)
 	return 0;
 }
 
+#endif
+
+#ifdef CONFIG_CPU_V7M_FPU
+static int preserve_v7m_fpu_context(struct vfp_sigframe __user *frame)
+{
+	struct vfp_sigframe kframe = {
+		.magic = VFP_MAGIC,
+		.size = VFP_STORAGE_SIZE,
+	};
+	struct v7m_fpu_state *state = &current_thread_info()->v7m_fpu;
+
+	preempt_disable();
+	v7m_fpu_save_state(state);
+	/* The standard ABI exposes D32; this implementation has D16. */
+	memcpy(kframe.ufp.fpregs, state->dregs, sizeof(state->dregs));
+	kframe.ufp.fpscr = state->fpscr;
+	preempt_enable();
+	return __copy_to_user(frame, &kframe, sizeof(kframe));
+}
+
+static int restore_v7m_fpu_context(char __user **auxp)
+{
+	struct vfp_sigframe frame;
+	struct v7m_fpu_state *state = &current_thread_info()->v7m_fpu;
+
+	if (__copy_from_user(&frame, *auxp, sizeof(frame)))
+		return -EFAULT;
+	if (frame.magic != VFP_MAGIC || frame.size != VFP_STORAGE_SIZE)
+		return -EINVAL;
+	preempt_disable();
+	memcpy(state->dregs, frame.ufp.fpregs, sizeof(state->dregs));
+	state->fpscr = frame.ufp.fpscr;
+	v7m_fpu_restore_state(state);
+	preempt_enable();
+	*auxp += sizeof(frame);
+	return 0;
+}
 #endif
 
 #ifdef CONFIG_VFP
@@ -179,6 +217,10 @@ static int restore_sigframe(struct pt_regs *regs, struct sigframe __user *sf)
 #ifdef CONFIG_VFP
 	if (err == 0)
 		err |= restore_vfp_context(&aux);
+#endif
+#ifdef CONFIG_CPU_V7M_FPU
+	if (err == 0)
+		err |= restore_v7m_fpu_context(&aux);
 #endif
 
 	return err;
@@ -291,6 +333,10 @@ setup_sigframe(struct sigframe __user *sf, struct pt_regs *regs, sigset_t *set)
 #ifdef CONFIG_VFP
 	if (err == 0)
 		err |= preserve_vfp_context(&aux->vfp);
+#endif
+#ifdef CONFIG_CPU_V7M_FPU
+	if (err == 0)
+		err |= preserve_v7m_fpu_context(&aux->vfp);
 #endif
 	err |= __put_user(0, &aux->end_magic);
 

@@ -56,6 +56,20 @@ struct cpu_context_save {
 	__u32	extra[2];		/* Xscale 'acc' register, etc */
 };
 
+#ifdef CONFIG_CPU_V7M_FPU
+/*
+ * M-profile FPv5-D16 user state. The kernel never uses these registers;
+ * entry-v7m.S saves and restores this block during __switch_to().
+ */
+struct v7m_fpu_state {
+	__u64		dregs[16];
+	__u32		fpscr;
+};
+
+extern void v7m_fpu_save_state(struct v7m_fpu_state *state);
+extern void v7m_fpu_restore_state(const struct v7m_fpu_state *state);
+#endif
+
 /*
  * low level task data that entry.S needs immediate access to.
  * __switch_to() assumes cpu_context follows immediately after cpu_domain.
@@ -70,6 +84,9 @@ struct thread_info {
 	unsigned long		tp_value[2];	/* TLS registers */
 	union fp_state		fpstate __attribute__((aligned(8)));
 	union vfp_state		vfpstate;
+#ifdef CONFIG_CPU_V7M_FPU
+	struct v7m_fpu_state	v7m_fpu __aligned(8);
+#endif
 #ifdef CONFIG_ARM_THUMBEE
 	unsigned long		thumbee_state;	/* ThumbEE Handler Base register */
 #endif

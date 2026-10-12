@@ -116,6 +116,36 @@ __v7m_setup:
 __v7m_setup_cont:
 	@ Configure the vector table base address
 	ldr	r0, =BASEADDR_V7M_SCB
+
+#ifdef CONFIG_CPU_V7M_FPU
+	@ Unsupported hardware is diagnosed by v7m_fpu_init(), before tasks run.
+	ldr	r1, [r0, #V7M_SCB_MVFR0]
+	movw	r5, #V7M_MVFR0_FP_MASK
+	and	r1, r1, r5
+	movw	r5, #V7M_MVFR0_D16_SP_DP
+	cmp	r1, r5
+	bne	2f
+	@ Enable user CP10/CP11 access. Do not use automatic/lazy FP stacking:
+	@ entry-v7m.S currently owns a fixed basic exception-frame layout.
+	ldr	r1, [r0, #V7M_SCB_CPACR]
+	orr	r1, r1, #V7M_SCB_CPACR_CP10_CP11_FULL
+	str	r1, [r0, #V7M_SCB_CPACR]
+	dsb
+	isb
+	ldr	r1, [r0, #V7M_SCB_FPCCR]
+	bic	r1, r1, #V7M_SCB_FPCCR_ASPEN
+	bic	r1, r1, #V7M_SCB_FPCCR_LSPEN
+	str	r1, [r0, #V7M_SCB_FPCCR]
+	@ A floating-point bootloader may leave CONTROL.FPCA set. Clear it
+	@ before the setup SVC, which also expects a basic exception frame.
+	dsb
+	mrs	r1, control
+	bic	r1, r1, #4
+	msr	control, r1
+	isb
+2:
+#endif
+
 	ldr	r12, =vector_table
 	str	r12, [r0, V7M_SCB_VTOR]
 

@@ -331,6 +331,22 @@ config ARM_SINGLE_ARMV7M
 	select CPU_V7M
 	select NO_IOPORT_MAP
 
+config CPU_V7M_FPU
+	bool "Cortex-M floating-point context support"
+	depends on CPU_V7M
+	default n
+	help
+	  Enable the Cortex-M floating-point extension for user mode. This is
+	  for an implementation with D16 single and double precision support,
+	  such as a double-precision Cortex-M7. Unsupported hardware is rejected
+	  during boot. The kernel itself continues to be built
+	  without floating-point code; it only enables user access and saves
+	  D0-D15 plus FPSCR over task switches.
+
+	  This option deliberately disables automatic and lazy FP stacking.
+	  The V7-M exception entry code currently consumes basic frames only,
+	  and explicit context switching avoids changing that frame ABI.
+
 config ARCH_MMAP_RND_BITS_MIN
 	default 8
 

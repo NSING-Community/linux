@@ -140,6 +140,13 @@ ENDPROC(__pendsv_entry)
 ENTRY(__switch_to)
 	.fnstart
 	.cantunwind
+#ifdef CONFIG_CPU_V7M_FPU
+	/* Manual state management keeps V7-M exception frames basic. */
+	add	ip, r1, #TI_V7M_FPU
+	vstmia	ip, {d0-d15}
+	vmrs	r3, fpscr
+	str	r3, [ip, #V7M_FPU_FPSCR]
+#endif
 	add	ip, r1, #TI_CPU_SAVE
 	stmia	ip!, {r4 - r11}		@ Store most regs on stack
 	str	sp, [ip], #4
@@ -153,6 +160,12 @@ ENTRY(__switch_to)
 	mov	r0, r5
 	mov	r1, r6
 
+#ifdef CONFIG_CPU_V7M_FPU
+	add	ip, r6, #TI_V7M_FPU
+	vldmia	ip, {d0-d15}
+	ldr	r3, [ip, #V7M_FPU_FPSCR]
+	vmsr	fpscr, r3
+#endif
 	ldmia	r4, {r4 - r12, lr}	@ Load all regs saved previously
 	set_current r1, r2
 	mov	sp, ip
@@ -160,6 +173,21 @@ ENTRY(__switch_to)
 	.fnend
 ENDPROC(__switch_to)
 
+#ifdef CONFIG_CPU_V7M_FPU
+ENTRY(v7m_fpu_save_state)
+	vstmia	r0, {d0-d15}
+	vmrs	r1, fpscr
+	str	r1, [r0, #V7M_FPU_FPSCR]
+	bx	lr
+ENDPROC(v7m_fpu_save_state)
+
+ENTRY(v7m_fpu_restore_state)
+	vldmia	r0, {d0-d15}
+	ldr	r1, [r0, #V7M_FPU_FPSCR]
+	vmsr	fpscr, r1
+	bx	lr
+ENDPROC(v7m_fpu_restore_state)
+#endif
 
 	.data
 #if CONFIG_CPU_V7M_NUM_IRQ <= 112

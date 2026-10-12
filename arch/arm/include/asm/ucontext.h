@@ -55,7 +55,7 @@ struct iwmmxt_sigframe {
 } __attribute__((__aligned__(8)));
 #endif /* CONFIG_IWMMXT */
 
-#ifdef CONFIG_VFP
+#if defined(CONFIG_VFP) || defined(CONFIG_CPU_V7M_FPU)
 #define VFP_MAGIC		0x56465001
 
 struct vfp_sigframe
@@ -84,7 +84,7 @@ struct aux_sigframe {
 #ifdef CONFIG_IWMMXT
 	struct iwmmxt_sigframe	iwmmxt;
 #endif
-#ifdef CONFIG_VFP
+#if defined(CONFIG_VFP) || defined(CONFIG_CPU_V7M_FPU)
 	struct vfp_sigframe	vfp;
 #endif
 	/* Something that isn't a valid magic number for any coprocessor.  */

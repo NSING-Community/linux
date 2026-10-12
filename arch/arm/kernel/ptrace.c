@@ -665,12 +665,66 @@ static int vfp_set(struct task_struct *target,
 
 	return 0;
 }
-#endif /* CONFIG_VFP */
+#elif defined(CONFIG_CPU_V7M_FPU)
+static void v7m_fpu_sync_state(struct task_struct *target)
+{
+	/* Stopped tasks were saved by the eager context switch. */
+	if (target == current) {
+		preempt_disable();
+		v7m_fpu_save_state(&task_thread_info(target)->v7m_fpu);
+		preempt_enable();
+	}
+}
+
+static int vfp_get(struct task_struct *target,
+		   const struct user_regset *regset, struct membuf to)
+{
+	struct v7m_fpu_state *state = &task_thread_info(target)->v7m_fpu;
+
+	v7m_fpu_sync_state(target);
+	membuf_write(&to, state->dregs, sizeof(state->dregs));
+	membuf_zero(&to, offsetof(struct user_vfp, fpscr) - sizeof(state->dregs));
+	return membuf_store(&to, state->fpscr);
+}
+
+static int vfp_set(struct task_struct *target,
+		   const struct user_regset *regset,
+		   unsigned int pos, unsigned int count,
+		   const void *kbuf, const void __user *ubuf)
+{
+	struct v7m_fpu_state *state = &task_thread_info(target)->v7m_fpu;
+	struct v7m_fpu_state new_state;
+	const size_t fpscr_offset = offsetof(struct user_vfp, fpscr);
+	int ret;
+
+	v7m_fpu_sync_state(target);
+	new_state = *state;
+	ret = user_regset_copyin(&pos, &count, &kbuf, &ubuf,
+				 &new_state.dregs, 0, sizeof(new_state.dregs));
+	if (ret)
+		return ret;
+	user_regset_copyin_ignore(&pos, &count, &kbuf, &ubuf,
+				  sizeof(new_state.dregs), fpscr_offset);
+	ret = user_regset_copyin(&pos, &count, &kbuf, &ubuf,
+				 &new_state.fpscr, fpscr_offset,
+				 fpscr_offset + sizeof(new_state.fpscr));
+	if (ret)
+		return ret;
+
+	/* Commit only after all user copies succeeded. */
+	preempt_disable();
+	*state = new_state;
+	if (target == current)
+		v7m_fpu_restore_state(state);
+	preempt_enable();
+	return 0;
+}
+#endif /* CONFIG_VFP || CONFIG_CPU_V7M_FPU */
 
 enum arm_regset {
 	REGSET_GPR,
 	REGSET_FPR,
-#ifdef CONFIG_VFP
+#if defined(CONFIG_VFP) || defined(CONFIG_CPU_V7M_FPU)
 	REGSET_VFP,
 #endif
 };
@@ -696,7 +750,7 @@ static const struct user_regset arm_regsets[] = {
 		.regset_get = fpa_get,
 		.set = fpa_set
 	},
-#ifdef CONFIG_VFP
+#if defined(CONFIG_VFP) || defined(CONFIG_CPU_V7M_FPU)
 	[REGSET_VFP] = {
 		/*
 		 * Pretend that the VFP regs are word-sized, since the FPSCR is
@@ -787,7 +841,7 @@ long arch_ptrace(struct task_struct *child, long request,
 			ret = 0;
 			break;
 
-#ifdef CONFIG_VFP
+#if defined(CONFIG_VFP) || defined(CONFIG_CPU_V7M_FPU)
 		case PTRACE_GETVFPREGS:
 			ret = copy_regset_to_user(child,
 						  &user_arm_view, REGSET_VFP,

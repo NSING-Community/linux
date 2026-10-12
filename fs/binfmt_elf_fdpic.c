@@ -1386,9 +1386,8 @@ struct elf_thread_status
 {
 	struct elf_thread_status *next;
 	struct elf_prstatus_fdpic prstatus;	/* NT_PRSTATUS */
-	elf_fpregset_t fpu;		/* NT_PRFPREG */
-	struct memelfnote notes[2];
 	int num_notes;
+	struct memelfnote notes[];
 };
 
 /*
@@ -1402,7 +1401,7 @@ static struct elf_thread_status *elf_dump_thread_status(long signr, struct task_
 	struct elf_thread_status *t;
 	int i, ret;
 
-	t = kzalloc_obj(struct elf_thread_status);
+	t = kzalloc(struct_size(t, notes, view->n), GFP_KERNEL);
 	if (!t)
 		return t;
 
@@ -1418,20 +1417,22 @@ static struct elf_thread_status *elf_dump_thread_status(long signr, struct task_
 
 	for (i = 1; i < view->n; ++i) {
 		const struct user_regset *regset = &view->regsets[i];
-		if (regset->core_note_type != NT_PRFPREG)
+		void *data;
+
+		if (!regset->core_note_type)
 			continue;
 		if (regset->active && regset->active(p, regset) <= 0)
 			continue;
-		ret = regset_get(p, regset, sizeof(t->fpu), &t->fpu);
-		if (ret >= 0)
+		ret = regset_get_alloc(p, regset, ~0U, &data);
+		if (ret < 0)
+			continue;
+		if (regset->core_note_type == NT_PRFPREG)
 			t->prstatus.pr_fpvalid = 1;
-		break;
-	}
-
-	if (t->prstatus.pr_fpvalid) {
-		fill_note(&t->notes[1], PRFPREG, sizeof(t->fpu), &t->fpu);
+		__fill_note(&t->notes[t->num_notes],
+			    regset->core_note_name ?: "LINUX",
+			    regset->core_note_type, ret, data);
+		*sz += notesize(&t->notes[t->num_notes]);
 		t->num_notes++;
-		*sz += notesize(&t->notes[1]);
 	}
 	return t;
 }
@@ -1660,6 +1661,8 @@ end_coredump:
 	while (thread_list) {
 		tmp = thread_list;
 		thread_list = thread_list->next;
+		for (i = 1; i < tmp->num_notes; i++)
+			kfree(tmp->notes[i].data);
 		kfree(tmp);
 	}
 	kfree(phdr4note);

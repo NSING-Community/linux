@@ -75,6 +75,8 @@ obj-$(CONFIG_MMC_BCM2835)	+= bcm2835.o
 obj-$(CONFIG_MMC_OWL)		+= owl-mmc.o
 obj-$(CONFIG_MMC_LOONGSON2)	+= loongson2-mmc.o
 
+obj-$(CONFIG_MMC_N32H7XX_SDHCI)	+= nsing/
+
 obj-$(CONFIG_MMC_REALTEK_PCI)	+= rtsx_pci_sdmmc.o
 obj-$(CONFIG_MMC_REALTEK_USB)	+= rtsx_usb_sdmmc.o
 

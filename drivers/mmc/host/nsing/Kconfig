@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: GPL-2.0-only
+
+config MMC_N32H7XX_SDHCI
+	tristate "NSING N32H7xx SDHCI controller"
+	depends on ARCH_NSING
+	depends on MMC_SDHCI_PLTFM && OF
+	select MMC_SDHCI_IO_ACCESSORS
+	help
+	  Support for the SDHCI-compatible SDMMC controller found on
+	  NSING N32H7xx SoCs.  The driver configures the NSING wrapper in
+	  front of the standard SDHCI register block.
+
+	  If unsure, say N.

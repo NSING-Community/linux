@@ -1141,6 +1141,8 @@ config MMC_LOONGSON2
 
 	  If unsure, say N.
 
+source "drivers/mmc/host/nsing/Kconfig"
+
 config MMC_SDHCI_EXTERNAL_DMA
 	bool
 

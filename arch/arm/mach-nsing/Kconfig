@@ -2,6 +2,7 @@
 menuconfig ARCH_NSING
 	bool "NSING SoC support"
 	depends on ARM_SINGLE_ARMV7M
+	select ARMV7M_SYSTICK_CLOCKEVENT
 	select CLKSRC_MMIO
 	select RESET_CONTROLLER
 	help
@@ -20,5 +21,11 @@ config SOC_N32H7XX
 	  supported member and combines a Cortex-M7 with a Cortex-M4.
 	  Linux runs on the Cortex-M7 and uses external SDRAM for memory.
 	  The Cortex-M4 is not managed by this platform support.
+
+config ARMV7M_SYSTICK_CLOCKEVENT
+	bool
+	help
+	  Select the ARMv7-M SysTick exception entry for a platform-provided
+	  clock event driver.
 
 endif

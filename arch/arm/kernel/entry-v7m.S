@@ -118,6 +118,43 @@ __irq_entry:
 	cpsie	i
 	bx	lr
 ENDPROC(__irq_entry)
+#ifdef CONFIG_ARMV7M_SYSTICK_CLOCKEVENT
+__systick_entry:
+	v7m_exception_entry
+
+	mov	r0, sp
+	ldr_this_cpu sp, irq_stack_ptr, r1, r2
+
+	@ If this exception arrived while already using the IRQ stack, keep it.
+	subs	r2, sp, r0
+	rsbscs	r2, r2, #THREAD_SIZE
+	movcs	sp, r0
+
+	push	{r0, lr}
+	bl	armv7m_systick_handle_irq
+	pop	{r0, lr}
+	mov	sp, r0
+
+	@ Check for pending work if returning to user.
+	ldr	r1, =BASEADDR_V7M_SCB
+	ldr	r0, [r1, V7M_SCB_ICSR]
+	tst	r0, V7M_SCB_ICSR_RETTOBASE
+	beq	1f
+
+	get_thread_info tsk
+	ldr	r2, [tsk, #TI_FLAGS]
+	movs	r2, r2, lsl #16
+	beq	1f
+	mov	r0, #V7M_SCB_ICSR_PENDSVSET
+	str	r0, [r1, V7M_SCB_ICSR]
+
+1:
+	ldmia	sp!, {r0-r11}
+	add	sp, #PT_REGS_SIZE-S_IP
+	cpsie	i
+	bx	lr
+ENDPROC(__systick_entry)
+#endif
 
 __pendsv_entry:
 	v7m_exception_entry
@@ -215,7 +252,11 @@ ENTRY(vector_table)
 	.long	__invalid_entry		@ 12 - Debug Monitor
 	.long	__invalid_entry		@ 13 - Reserved
 	.long	__pendsv_entry		@ 14 - PendSV
+#ifdef CONFIG_ARMV7M_SYSTICK_CLOCKEVENT
+	.long	__systick_entry		@ 15 - SysTick
+#else
 	.long	__invalid_entry		@ 15 - SysTick
+#endif
 	.rept	CONFIG_CPU_V7M_NUM_IRQ
 	.long	__irq_entry		@ External Interrupts
 	.endr

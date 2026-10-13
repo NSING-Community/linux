@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: GPL-2.0-only
+config PHY_N32H7XX_USB
+	tristate "NSING N32H7xx USB HS PHY"
+	depends on ARCH_NSING || COMPILE_TEST
+	depends on OF && HAS_IOMEM
+	select GENERIC_PHY
+	select MFD_SYSCON
+	help
+	  Enable the integrated USB high-speed PHYs on N32H7xx SoCs.
+	  The USB controller itself is handled by the DWC2 driver.

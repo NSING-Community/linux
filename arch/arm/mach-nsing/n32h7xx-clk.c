@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* N32H7xx console and timekeeping clocks. */
+/* N32H7xx console, timekeeping and USB clocks. */
 #include <linux/bitops.h>
 #include <linux/clk-provider.h>
 #include <linux/delay.h>
@@ -7,20 +7,23 @@
 #include <linux/of_address.h>
 #include <linux/slab.h>
 #include <linux/reset-controller.h>
+#include <linux/spinlock.h>
 
 #define N32H7XX_APB1DIV1 0x74
 #define N32H7XX_APB1EN3  0x88
-#define N32H7XX_PERIPH_GATES (BIT(31) | BIT(29))
 #define N32H7XX_APB1EN1 0x80
 #define N32H7XX_APB1RST1 0x94
-#define N32H7XX_BTIM1_RESET BIT(28)
-#define N32H7XX_NUM_CLOCKS 2
+#define N32H7XX_NUM_CLOCKS 5
+
+static DEFINE_SPINLOCK(n32h7xx_rcc_lock);
 
 struct n32h7xx_periph_clk {
 	struct clk_hw hw;
 	void __iomem *base;
 	u32 enable_reg;
 	u8 divider_shift;
+	u8 gate_shift;
+	bool bus_clock;
 };
 
 #define to_periph_clk(hw) container_of(hw, struct n32h7xx_periph_clk, hw)
@@ -29,12 +32,15 @@ static int n32h7xx_periph_clk_enable(struct clk_hw *hw)
 {
 	struct n32h7xx_periph_clk *clk = to_periph_clk(hw);
 	void __iomem *reg = clk->base + clk->enable_reg;
+	unsigned long flags;
 
-	writel(readl(reg) | BIT(31), reg);
+	spin_lock_irqsave(&n32h7xx_rcc_lock, flags);
+	writel(readl(reg) | BIT(clk->gate_shift), reg);
 	readl(reg);
 	/* The LP gate is valid only after enabling the run gate. */
-	writel(readl(reg) | BIT(29), reg);
+	writel(readl(reg) | BIT(clk->gate_shift - 2), reg);
 	readl(reg);
+	spin_unlock_irqrestore(&n32h7xx_rcc_lock, flags);
 	return 0;
 }
 
@@ -42,9 +48,13 @@ static void n32h7xx_periph_clk_disable(struct clk_hw *hw)
 {
 	struct n32h7xx_periph_clk *clk = to_periph_clk(hw);
 	void __iomem *reg = clk->base + clk->enable_reg;
+	unsigned long flags;
 
-	writel(readl(reg) & ~N32H7XX_PERIPH_GATES, reg);
+	spin_lock_irqsave(&n32h7xx_rcc_lock, flags);
+	writel(readl(reg) & ~(BIT(clk->gate_shift) |
+			     BIT(clk->gate_shift - 2)), reg);
 	readl(reg);
+	spin_unlock_irqrestore(&n32h7xx_rcc_lock, flags);
 }
 
 static int n32h7xx_periph_clk_is_enabled(struct clk_hw *hw)
@@ -52,15 +62,22 @@ static int n32h7xx_periph_clk_is_enabled(struct clk_hw *hw)
 	struct n32h7xx_periph_clk *clk = to_periph_clk(hw);
 	u32 val = readl(clk->base + clk->enable_reg);
 
-	return (val & N32H7XX_PERIPH_GATES) == N32H7XX_PERIPH_GATES;
+	u32 mask = BIT(clk->gate_shift) | BIT(clk->gate_shift - 2);
+
+	return (val & mask) == mask;
 }
 
 static unsigned long n32h7xx_periph_clk_recalc_rate(struct clk_hw *hw,
 						 unsigned long parent_rate)
 {
 	struct n32h7xx_periph_clk *clk = to_periph_clk(hw);
-	u32 div = (readl(clk->base + N32H7XX_APB1DIV1) >>
-		   clk->divider_shift) & 7;
+	u32 div;
+
+	if (clk->bus_clock)
+		return parent_rate;
+
+	div = (readl(clk->base + N32H7XX_APB1DIV1) >>
+	       clk->divider_shift) & 7;
 
 	/* Encodings 0..3 divide by one, 4..7 divide by 2, 4, 8, 16. */
 	return parent_rate >> (div < 4 ? 0 : div - 3);
@@ -79,30 +96,63 @@ struct n32h7xx_rcc {
 	struct reset_controller_dev resets;
 };
 
-static int n32h7xx_btim1_reset(struct reset_controller_dev *rcdev,
-			     unsigned long id)
+static int n32h7xx_reset_update(struct reset_controller_dev *rcdev,
+			      unsigned long id, bool assert)
 {
 	struct n32h7xx_rcc *rcc = container_of(rcdev, struct n32h7xx_rcc, resets);
-	void __iomem *reg = rcc->clocks[1].base + N32H7XX_APB1RST1;
+	static const u32 regs[] = { N32H7XX_APB1RST1, 0xb4, 0x64,
+				   0xb4, 0x64 };
+	static const u32 masks[] = { BIT(28), BIT(20), BIT(20),
+				    BIT(21), BIT(21) };
+	void __iomem *reg;
+	unsigned long flags;
+	u32 val;
 
-	if (id)
+	if (id >= ARRAY_SIZE(regs))
 		return -EINVAL;
-	writel(readl(reg) | N32H7XX_BTIM1_RESET, reg);
+	reg = rcc->clocks[0].base + regs[id];
+	spin_lock_irqsave(&n32h7xx_rcc_lock, flags);
+	val = readl(reg);
+	writel(assert ? val | masks[id] : val & ~masks[id], reg);
 	readl(reg);
-	udelay(2);
-	writel(readl(reg) & ~N32H7XX_BTIM1_RESET, reg);
-	readl(reg);
+	spin_unlock_irqrestore(&n32h7xx_rcc_lock, flags);
 	return 0;
 }
 
+static int n32h7xx_reset_assert(struct reset_controller_dev *rcdev,
+			      unsigned long id)
+{
+	return n32h7xx_reset_update(rcdev, id, true);
+}
+
+static int n32h7xx_reset_deassert(struct reset_controller_dev *rcdev,
+				unsigned long id)
+{
+	return n32h7xx_reset_update(rcdev, id, false);
+}
+
+static int n32h7xx_reset(struct reset_controller_dev *rcdev, unsigned long id)
+{
+	int ret = n32h7xx_reset_assert(rcdev, id);
+
+	if (ret)
+		return ret;
+	udelay(2);
+	return n32h7xx_reset_deassert(rcdev, id);
+}
+
 static const struct reset_control_ops n32h7xx_reset_ops = {
-	.reset = n32h7xx_btim1_reset,
+	.assert = n32h7xx_reset_assert,
+	.deassert = n32h7xx_reset_deassert,
+	.reset = n32h7xx_reset,
 };
 
 static void __init n32h7xx_clk_init(struct device_node *np)
 {
 	const char *parent = of_clk_get_parent_name(np, 0);
-	static const char * const names[] = { "n32h7xx-usart1", "n32h7xx-btim1" };
+	const char *hse = of_clk_get_parent_name(np, 1);
+	static const char * const names[] = { "n32h7xx-usart1", "n32h7xx-btim1",
+					    "n32h7xx-usb1", "n32h7xx-usb2" };
 	struct clk_init_data init = {
 		.ops = &n32h7xx_periph_clk_ops,
 		.parent_names = &parent,
@@ -125,12 +175,15 @@ static void __init n32h7xx_clk_init(struct device_node *np)
 	if (!base)
 		goto free_data;
 	rcc->data->num = N32H7XX_NUM_CLOCKS;
-	for (i = 0; i < N32H7XX_NUM_CLOCKS; i++) {
+	for (i = 0; i < ARRAY_SIZE(names); i++) {
 		struct n32h7xx_periph_clk *clk = &rcc->clocks[i];
 
 		clk->base = base;
-		clk->enable_reg = i ? N32H7XX_APB1EN1 : N32H7XX_APB1EN3;
+		clk->enable_reg = i == 2 ? 0xb0 : i == 3 ? 0x54 :
+				  i ? N32H7XX_APB1EN1 : N32H7XX_APB1EN3;
 		clk->divider_shift = i ? 24 : 28;
+		clk->gate_shift = i >= 2 ? 23 : 31;
+		clk->bus_clock = i >= 2;
 		init.name = names[i];
 		clk->hw.init = &init;
 		/* Preserve early console gates before registering its clock. */
@@ -141,9 +194,20 @@ static void __init n32h7xx_clk_init(struct device_node *np)
 			goto unregister;
 		rcc->data->hws[i] = &clk->hw;
 	}
+	if (hse) {
+		/* Feed the PHY PLL directly from HSE, without prescaling. */
+		writel(readl(base + 0xa8) & ~GENMASK(3, 0), base + 0xa8);
+		readl(base + 0xa8);
+		rcc->data->hws[4] = clk_hw_register_fixed_factor(NULL,
+					"n32h7xx-usb-ref", hse, 0, 1, 1);
+		if (IS_ERR(rcc->data->hws[4]))
+			goto unregister;
+	} else {
+		rcc->data->hws[4] = ERR_PTR(-ENOENT);
+	}
 	rcc->resets.ops = &n32h7xx_reset_ops;
 	rcc->resets.of_node = np;
-	rcc->resets.nr_resets = 1;
+	rcc->resets.nr_resets = 5;
 	ret = reset_controller_register(&rcc->resets);
 	if (ret)
 		goto unregister;
@@ -152,6 +216,8 @@ static void __init n32h7xx_clk_init(struct device_node *np)
 		return;
 	reset_controller_unregister(&rcc->resets);
 unregister:
+	if (!IS_ERR_OR_NULL(rcc->data->hws[4]))
+		clk_hw_unregister_fixed_factor(rcc->data->hws[4]);
 	while (i--)
 		clk_hw_unregister(&rcc->clocks[i].hw);
 	iounmap(base);

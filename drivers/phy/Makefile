@@ -39,6 +39,7 @@ obj-$(CONFIG_GENERIC_PHY)		+= allwinner/	\
 					   motorola/	\
 					   mscc/	\
 					   nuvoton/	\
+					   nsing/	\
 					   qualcomm/	\
 					   ralink/	\
 					   realtek/	\

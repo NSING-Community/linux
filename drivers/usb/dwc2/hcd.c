@@ -50,7 +50,9 @@ static void dwc2_enable_common_interrupts(struct dwc2_hsotg *hsotg)
 	dwc2_writel(hsotg, 0xffffffff, GINTSTS);
 
 	/* Enable the interrupts in the GINTMSK */
-	intmsk = GINTSTS_MODEMIS | GINTSTS_OTGINT;
+	intmsk = GINTSTS_MODEMIS;
+	if (!hsotg->params.no_otg_int)
+		intmsk |= GINTSTS_OTGINT;
 
 	if (!hsotg->params.host_dma)
 		intmsk |= GINTSTS_RXFLVL;

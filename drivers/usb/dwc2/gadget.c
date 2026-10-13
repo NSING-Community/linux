@@ -3462,6 +3462,8 @@ void dwc2_hsotg_core_init_disconnected(struct dwc2_hsotg *hsotg,
 		GINTSTS_ENUMDONE | GINTSTS_OTGINT |
 		GINTSTS_USBSUSP | GINTSTS_WKUPINT |
 		GINTSTS_LPMTRANRCVD;
+	if (hsotg->params.no_otg_int)
+		intmsk &= ~GINTSTS_OTGINT;
 
 	if (!using_desc_dma(hsotg))
 		intmsk |= GINTSTS_INCOMPL_SOIN | GINTSTS_INCOMPL_SOOUT;

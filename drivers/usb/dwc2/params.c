@@ -303,7 +303,38 @@ static void dwc2_set_stm32mp15_hsotg_params(struct dwc2_hsotg *hsotg)
 	p->hird_threshold_en = false;
 }
 
+static void dwc2_set_n32h7xx_params(struct dwc2_hsotg *hsotg)
+{
+	struct dwc2_core_params *p = &hsotg->params;
+	struct dwc2_hw_params *hw = &hsotg->hw_params;
+	int i;
+
+	/* GOTGINT is reserved on N32H7xx; its pending bits cannot be cleared. */
+	p->no_otg_int = true;
+	p->power_down = DWC2_POWER_DOWN_PARAM_NONE;
+	p->no_clock_gating = true;
+	p->lpm = false;
+
+	/*
+	 * FIFO reset depths are not capacities on this dynamic-FIFO core.
+	 * In particular, the dedicated IN FIFO registers reset to zero.
+	 * Each FIFO can use the shared RAM, subject to the total budget.
+	 */
+	if (hw->enable_dynamic_fifo) {
+		hw->rx_fifo_size = hw->total_fifo_size;
+		hw->host_nperio_tx_fifo_size = hw->total_fifo_size;
+		hw->host_perio_tx_fifo_size = hw->total_fifo_size;
+		hw->dev_nperio_tx_fifo_size = hw->total_fifo_size;
+		for (i = 1; i <= dwc2_hsotg_tx_fifo_count(hsotg); i++)
+			hw->g_tx_fifo_size[i] = hw->total_fifo_size;
+	}
+	p->host_rx_fifo_size = 512;
+	p->host_nperio_tx_fifo_size = 128;
+	p->host_perio_tx_fifo_size = 256;
+}
+
 const struct of_device_id dwc2_of_match_table[] = {
+	{ .compatible = "nsing,n32h7xx-usb", .data = dwc2_set_n32h7xx_params },
 	{ .compatible = "brcm,bcm2835-usb", .data = dwc2_set_bcm_params },
 	{ .compatible = "hisilicon,hi6220-usb", .data = dwc2_set_his_params },
 	{ .compatible = "ingenic,jz4775-otg", .data = dwc2_set_jz4775_params },

@@ -7,6 +7,12 @@
 	#size-cells = <1>;
 
 	clocks {
+		clk_hse: hse {
+			compatible = "fixed-clock";
+			#clock-cells = <0>;
+			clock-frequency = <25000000>;
+			clock-output-names = "hse";
+		};
 		clk_ahb1: clock-ahb1 {
 			compatible = "fixed-clock";
 			#clock-cells = <0>;
@@ -49,7 +55,78 @@
 			reg = <0x58030000 0x400>;
 			#clock-cells = <1>;
 			#reset-cells = <1>;
-			clocks = <&clk_ahb1>;
+			clocks = <&clk_ahb1>, <&clk_hse>;
+		};
+
+		pwr: syscon@58031000 {
+			compatible = "nsing,n32h7xx-pwr", "syscon";
+			reg = <0x58031000 0x400>;
+		};
+
+		usb1_phy: phy@40140000 {
+			compatible = "nsing,n32h7xx-usb-phy";
+			reg = <0x40140000 0x8>;
+			#phy-cells = <0>;
+			clocks = <&rcc 4>, <&rcc 2>;
+			clock-names = "ref", "bus";
+			resets = <&rcc 3>;
+			reset-names = "por";
+			nsing,pwr = <&pwr>;
+			nsing,controller = <1>;
+			status = "disabled";
+		};
+
+		usb2_phy: phy@400a0000 {
+			compatible = "nsing,n32h7xx-usb-phy";
+			reg = <0x400a0000 0x8>;
+			#phy-cells = <0>;
+			clocks = <&rcc 4>, <&rcc 3>;
+			clock-names = "ref", "bus";
+			resets = <&rcc 4>;
+			reset-names = "por";
+			nsing,pwr = <&pwr>;
+			nsing,controller = <2>;
+			status = "disabled";
+		};
+
+		usb1: usb@40100000 {
+			compatible = "nsing,n32h7xx-usb", "snps,dwc2";
+			reg = <0x40100000 0x40000>;
+			interrupts = <99>;
+			clocks = <&rcc 2>;
+			clock-names = "otg";
+			resets = <&rcc 1>;
+			reset-names = "dwc2";
+			phys = <&usb1_phy>;
+			phy-names = "usb2-phy";
+			phy_type = "utmi";
+			maximum-speed = "high-speed";
+			g-rx-fifo-size = <512>;
+			g-np-tx-fifo-size = <128>;
+			g-tx-fifo-size = <128 128 16 16 16 16 16 16>;
+			hnp-disable;
+			srp-disable;
+			status = "disabled";
+		};
+
+		usb2: usb@40060000 {
+			compatible = "nsing,n32h7xx-usb", "snps,dwc2";
+			reg = <0x40060000 0x40000>;
+			interrupts = <103>;
+			clocks = <&rcc 3>;
+			clock-names = "otg";
+			resets = <&rcc 2>;
+			reset-names = "dwc2";
+			phys = <&usb2_phy>;
+			phy-names = "usb2-phy";
+			phy_type = "utmi";
+			maximum-speed = "high-speed";
+			g-rx-fifo-size = <512>;
+			g-np-tx-fifo-size = <128>;
+			g-tx-fifo-size = <128 128 16 16 16 16 16 16>;
+			hnp-disable;
+			srp-disable;
+			status = "disabled";
 		};
 
 		/*

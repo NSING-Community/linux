@@ -24,6 +24,17 @@
 
 	aliases {
 		serial0 = &usart1;
+		usb0 = &usb1;
+		usb1 = &usb2;
+	};
+
+	usb2_vbus: regulator-usb2-vbus {
+		compatible = "regulator-fixed";
+		regulator-name = "usb2-vbus";
+		regulator-min-microvolt = <5000000>;
+		regulator-max-microvolt = <5000000>;
+		gpio = <&gpiob 4 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
 	};
 
 	/* The bootloader loads the raw zImage+DTB at the start of the 32 MiB
@@ -67,6 +78,24 @@
  * signal that peripheral has on each pin, or an exact signal name.
  */
 &pinctrl {
+	usb1_pins: usb1-pins {
+		pins = "PA11", "PA12";
+		function = "usb1";
+		bias-disable;
+	};
+
+	usb2_pins: usb2-pins {
+		pins = "PB14", "PB15";
+		function = "usb2";
+		bias-disable;
+	};
+
+	/* Optional for boards with an actual ID connection; not the HMI Type-C. */
+	usb2_id_pin: usb2-id-pin {
+		pins = "PB12";
+		function = "usb2_id";
+		bias-pull-up;
+	};
 	usart1_pins: usart1-pins {
 		pins = "PA9", "PA10";
 		function = "usart1";
@@ -105,6 +134,35 @@
 			slew-rate = <0>;
 		};
 	};
+};
+
+&usb1_phy {
+	status = "okay";
+};
+
+&usb2_phy {
+	status = "okay";
+};
+
+&usb1 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&usb1_pins>;
+	/* PA10 stays USART1 RX; the HMI board has no usable USB1 ID. */
+	dr_mode = "otg";
+	usb-role-switch;
+	role-switch-default-mode = "peripheral";
+	status = "okay";
+};
+
+&usb2 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&usb2_pins>;
+	/* R147 is NC: PB12 is not a Type-C role detector on this board. */
+	dr_mode = "otg";
+	usb-role-switch;
+	role-switch-default-mode = "host";
+	vbus-supply = <&usb2_vbus>;
+	status = "okay";
 };
 
 &usart1 {

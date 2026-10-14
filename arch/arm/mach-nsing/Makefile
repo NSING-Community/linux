@@ -5,6 +5,7 @@ obj-y += v7m-fault.o
 obj-y += idle.o
 obj-y += btim.o
 obj-y += n32h7xx-eth.o
+obj-y += n32h7xx-dvp.o
 obj-y += n32h7xx-rtc.o
 obj-y += n32h7xx-ucid.o
 obj-$(CONFIG_SERIAL_N32H7XX) += n32h7xx-usart.o

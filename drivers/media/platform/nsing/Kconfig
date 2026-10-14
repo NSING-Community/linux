@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: GPL-2.0-only
+
+comment "NSING media platform drivers"
+
+config VIDEO_N32H7XX_DVP
+	tristate "NSING N32H7xx DVP parallel camera capture"
+	depends on V4L_PLATFORM_DRIVERS && VIDEO_DEV
+	depends on ARCH_NSING || COMPILE_TEST
+	select VIDEOBUF2_DMA_CONTIG
+	select VIDEOBUF2_VMALLOC
+	select V4L2_FWNODE
+	help
+	  Capture support for the DVP (Digital Video Port) parallel camera
+	  interface on the NSING N32H7xx SoCs.  The DVP has its own AHB master
+	  that writes completed frames straight into SDRAM, so the driver hands
+	  it a buffer at a time and reports the frame to userspace through the
+	  V4L2 capture API.
+
+	  Buffers are allocated from the "memory-region" reserved pool the
+	  board describes, or from the largest physically contiguous block the
+	  allocator can hand out when there is none.  The kernel runs without
+	  an MMU, so vmalloc() is kmalloc() here and a frame cannot be split
+	  across pages.
+
+	  A sensor subdevice has to be described in the device tree behind the
+	  DVP port; this driver binds it through the media device tree and
+	  supports monochrome (8-bit Y), JPEG, RGB565 and YUV422 output from
+	  the sensor.
+
+	  To compile this driver as a module, choose M here: the module will be
+	  called n32h7xx-dvp.

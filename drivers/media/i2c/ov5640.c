@@ -101,11 +101,27 @@
 #define OV5640_REG_SIGMADELTA_CTRL0C	0x3c0c
 #define OV5640_REG_FRAME_CTRL01		0x4202
 #define OV5640_REG_FORMAT_CONTROL00	0x4300
+/*
+ * FORMAT CONTROL 02..05: the byte-shuffle block between the ISP and the DVP
+ * output.  Used to force a fixed Y/U/V (or Y-only) stream on the parallel
+ * bus, see ov5640_set_framefmt().
+ */
+#define OV5640_REG_FORMAT_CONTROL02	0x4302
+#define OV5640_REG_FORMAT_CONTROL03	0x4303
+#define OV5640_REG_FORMAT_CONTROL04	0x4304
+#define OV5640_REG_FORMAT_CONTROL05	0x4305
 #define OV5640_REG_VFIFO_HSIZE		0x4602
 #define OV5640_REG_VFIFO_VSIZE		0x4604
 #define OV5640_REG_JPG_MODE_SELECT	0x4713
 #define OV5640_REG_CCIR656_CTRL00	0x4730
 #define OV5640_REG_POLARITY_CTRL00	0x4740
+/*
+ * DVP data order.  Bits [2:1] select which sensor output lines the 8-bit bus
+ * is taken from on the parallel port: 00 = D[9:2], x1 = D[7:0].  Boards that
+ * wire the DVP to D[9:2] (the usual layout, and what the N32H7xx HMI board
+ * does) need 0 here or the top two bits of every byte never arrive.
+ */
+#define OV5640_REG_DVP_DATA_ORDER	0x4745
 #define OV5640_REG_MIPI_CTRL00		0x4800
 #define OV5640_REG_DEBUG_MODE		0x4814
 #define OV5640_REG_PCLK_PERIOD		0x4837
@@ -261,6 +277,18 @@ static const struct ov5640_pixfmt ov5640_dvp_formats[] = {
 		.bpp		= 8,
 		.ctrl00		= 0x03,
 		.mux		= OV5640_FMT_MUX_RAW_DPC,
+	}, {
+		/*
+		 * 8-bit luminance only (monochrome Y).  FORMAT CONTROL00 = 0x10
+		 * asks the ISP for the Y channel alone and 0x4302..0x4305 are
+		 * programmed in ov5640_set_framefmt() so every output byte is
+		 * that Y sample instead of the usual Y/U/Y/V sequence.
+		 */
+		.code		= MEDIA_BUS_FMT_Y8_1X8,
+		.colorspace	= V4L2_COLORSPACE_SRGB,
+		.bpp		= 8,
+		.ctrl00		= 0x10,
+		.mux		= OV5640_FMT_MUX_YUV422,
 	},
 	{ /* sentinel */ }
 };
@@ -439,6 +467,7 @@ struct ov5640_dev {
 	struct v4l2_fwnode_endpoint ep; /* the parsed DT endpoint info */
 	struct clk *xclk; /* system clock to OV5640 */
 	u32 xclk_freq;
+	u32 max_dvp_pclk;
 
 	struct regulator_bulk_data supplies[OV5640_NUM_SUPPLIES];
 	struct gpio_desc *reset_gpio;
@@ -464,6 +493,14 @@ struct ov5640_dev {
 
 	bool pending_mode_change;
 	bool streaming;
+
+	/*
+	 * Values of the ISP byte-shuffle block (FORMAT CONTROL 02..05) captured
+	 * before the first 8-bit Y format is programmed.  Switching back to a
+	 * colour format restores what the sensor had rather than a guess.
+	 */
+	u8 shuffle_save[4];
+	bool shuffle_saved;
 };
 
 static inline struct ov5640_dev *to_ov5640_dev(struct v4l2_subdev *sd)
@@ -1578,15 +1615,36 @@ static unsigned long ov5640_calc_pclk(struct ov5640_dev *sensor,
 static int ov5640_set_dvp_pclk(struct ov5640_dev *sensor)
 {
 	u8 prediv, mult, sysdiv, pll_rdiv, bit_div, pclk_div;
-	u32 rate;
+	u32 divider, rate;
 	int ret;
 
 	rate = ov5640_calc_pixel_rate(sensor);
 	rate *= ov5640_code_to_bpp(sensor, sensor->fmt.code);
 	rate /= sensor->ep.bus.parallel.bus_width;
 
-	ov5640_calc_pclk(sensor, rate, &prediv, &mult, &sysdiv, &pll_rdiv,
-			 &bit_div, &pclk_div);
+	rate = ov5640_calc_pclk(sensor, rate, &prediv, &mult, &sysdiv,
+				&pll_rdiv, &bit_div, &pclk_div);
+
+	/*
+	 * A board or receiver may not accept the pixel clock the mode would
+	 * otherwise produce.  Dividing the system clock is the only knob that
+	 * lowers PCLK without changing the PLL: SCLK and PCLK keep their
+	 * ratio, so the mode's timings still hold, only slower.  Pick the
+	 * smallest system division that brings PCLK under the limit; if even
+	 * the largest one cannot, stay at that division rather than refuse the
+	 * format.
+	 */
+	if (sensor->max_dvp_pclk && rate > sensor->max_dvp_pclk) {
+		/* JPEG permits PCLK == SCLK; YUV needs PCLK >= 2 * SCLK. */
+		if (sensor->fmt.code == MEDIA_BUS_FMT_JPEG_1X8)
+			pclk_div *= 2;
+
+		rate = sensor->xclk_freq / prediv * mult /
+			pll_rdiv / bit_div / pclk_div;
+		divider = DIV_ROUND_UP(rate, sensor->max_dvp_pclk);
+		divider = max(divider, (u32)sysdiv);
+		sysdiv = min_t(u32, divider, OV5640_SYSDIV_MAX);
+	}
 
 	if (bit_div == 2)
 		bit_div = 8;
@@ -2348,7 +2406,7 @@ static int ov5640_set_mode(struct ov5640_dev *sensor)
 	else
 		ret = ov5640_set_dvp_pclk(sensor);
 	if (ret < 0)
-		return 0;
+		goto restore_auto_exp_gain;
 
 	if ((dn_mode == SUBSAMPLING && orig_dn_mode == SCALING) ||
 	    (dn_mode == SCALING && orig_dn_mode == SUBSAMPLING)) {
@@ -2826,10 +2884,16 @@ static int ov5640_try_fmt_internal(struct v4l2_subdev *sd,
 
 	/*
 	 * Adjust mode according to bpp:
-	 * - 8bpp modes work for resolution >= 1280x720
+	 * - RAW Bayer 8bpp needs the defect-pixel-correction block, and that is
+	 *   only clocked for resolutions >= 1280x720
 	 * - 24bpp modes work resolution < 1280x720
+	 *
+	 * 8-bit Y (monochrome) is not a RAW format: the YUV pipeline's
+	 * luminance channel is read out at any size, so it must not be pushed
+	 * up to 720p here.
 	 */
-	if (bpp == 8 && mode->width < 1280)
+	if (bpp == 8 && pixfmt->mux == OV5640_FMT_MUX_RAW_DPC &&
+	    mode->width < 1280)
 		mode = &ov5640_mode_data[OV5640_MODE_720P_1280_720];
 	else if (bpp == 24 && mode->width > 1024)
 		mode = &ov5640_mode_data[OV5640_MODE_XGA_1024_768];
@@ -2979,8 +3043,14 @@ static int ov5640_set_fmt(struct v4l2_subdev *sd,
 		sensor->current_mode = new_mode;
 		sensor->pending_mode_change = true;
 	}
-	if (mbus_fmt->code != sensor->fmt.code)
+	if (mbus_fmt->code != sensor->fmt.code) {
 		sensor->pending_fmt_change = true;
+		/* A parallel byte clock depends on the format bit depth. */
+		if (!ov5640_is_csi2(sensor) &&
+		    ov5640_code_to_bpp(sensor, mbus_fmt->code) !=
+		    ov5640_code_to_bpp(sensor, sensor->fmt.code))
+			sensor->pending_mode_change = true;
+	}
 
 	/* update format even if code is unchanged, resolution might change */
 	sensor->fmt = *mbus_fmt;
@@ -3035,8 +3105,10 @@ static int ov5640_set_framefmt(struct ov5640_dev *sensor,
 			       struct v4l2_mbus_framefmt *format)
 {
 	bool is_jpeg = format->code == MEDIA_BUS_FMT_JPEG_1X8;
+	bool is_y8 = format->code == MEDIA_BUS_FMT_Y8_1X8;
 	const struct ov5640_pixfmt *pixfmt;
 	int ret = 0;
+	unsigned int i;
 
 	pixfmt = ov5640_code_to_pixfmt(sensor, format->code);
 
@@ -3045,6 +3117,61 @@ static int ov5640_set_framefmt(struct ov5640_dev *sensor,
 			       pixfmt->ctrl00);
 	if (ret)
 		return ret;
+
+	/*
+	 * FORMAT CONTROL 02..05 program the Y/U/V byte shuffle between the ISP
+	 * and the output.  8-bit Y wants the luminance channel passed through
+	 * whole and both chroma channels blanked so exactly one byte per pixel
+	 * leaves the ISP; colour formats want whatever the sensor already had,
+	 * so the first switch into Y8 saves that and leaving Y8 restores it.
+	 */
+	if (is_y8) {
+		if (!sensor->shuffle_saved) {
+			for (i = 0; i < ARRAY_SIZE(sensor->shuffle_save); i++) {
+				ret = ov5640_read_reg(sensor,
+						      OV5640_REG_FORMAT_CONTROL02 + i,
+						      &sensor->shuffle_save[i]);
+				if (ret)
+					return ret;
+			}
+			sensor->shuffle_saved = true;
+		}
+
+		ret = ov5640_write_reg(sensor, OV5640_REG_FORMAT_CONTROL02, 0x03);
+		if (ret)
+			return ret;
+		ret = ov5640_write_reg(sensor, OV5640_REG_FORMAT_CONTROL03, 0xff);
+		if (ret)
+			return ret;
+		ret = ov5640_write_reg(sensor, OV5640_REG_FORMAT_CONTROL04, 0x00);
+		if (ret)
+			return ret;
+		ret = ov5640_write_reg(sensor, OV5640_REG_FORMAT_CONTROL05, 0x00);
+		if (ret)
+			return ret;
+	} else if (sensor->shuffle_saved) {
+		for (i = 0; i < ARRAY_SIZE(sensor->shuffle_save); i++) {
+			ret = ov5640_write_reg(sensor,
+					       OV5640_REG_FORMAT_CONTROL02 + i,
+					       sensor->shuffle_save[i]);
+			if (ret)
+				return ret;
+		}
+	}
+
+	/*
+	 * DVP data order.  An 8-bit parallel stream is taken from the sensor's
+	 * D[9:2], which is what this driver requires of the wiring (see the
+	 * note in ov5640_set_power_dvp()); 0 selects exactly that.  Modules
+	 * have been seen to come up with the reset value routing the byte to
+	 * D[7:0] instead, which loses the top two bits of every sample on a
+	 * D[9:2] board.
+	 */
+	if (!ov5640_is_csi2(sensor)) {
+		ret = ov5640_write_reg(sensor, OV5640_REG_DVP_DATA_ORDER, 0x00);
+		if (ret)
+			return ret;
+	}
 
 	/* FORMAT MUX CONTROL: ISP YUV or RGB */
 	ret = ov5640_write_reg(sensor, OV5640_REG_ISP_FORMAT_MUX_CTRL,
@@ -3853,6 +3980,8 @@ static int ov5640_probe(struct i2c_client *client)
 		return -ENOMEM;
 
 	sensor->i2c_client = client;
+	device_property_read_u32(dev, "ovti,max-dvp-pclk-hz",
+				 &sensor->max_dvp_pclk);
 
 	/*
 	 * default init sequence initialize sensor to

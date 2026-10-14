@@ -44,6 +44,13 @@ properties:
     description: >
       Reference to the GPIO connected to the reset pin, if any.
 
+  ovti,max-dvp-pclk-hz:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: >
+      Optional maximum parallel-interface pixel clock in Hz. The driver adds
+      system-clock division when a DVP mode would exceed this board or host
+      receiver limit. This does not apply to the CSI-2 interface.
+
   port:
     description: Digital Output Port
     $ref: /schemas/graph.yaml#/$defs/port-base

@@ -1,0 +1,57 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/dma/nsing,n32h7xx-dma.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: NSING N32H7xx AHB DMA controller
+
+maintainers:
+  - Tobby Tan <tan.bo@nsingtech.com>
+
+description: |
+  DMA1 has eight channels with separate interrupt outputs. DMAMUX1 channel
+  registers 0 through 7 select the peripheral requests for DMA1. The DMA
+  specifier contains the DMAMUX request number.
+
+allOf:
+  - $ref: dma-controller.yaml#
+
+properties:
+  compatible:
+    const: nsing,n32h7xx-dma
+  reg:
+    items:
+      - description: DMA controller registers
+      - description: Eight DMA1 request selector registers in DMAMUX1
+  reg-names:
+    items:
+      - const: dma
+      - const: mux
+  interrupts:
+    minItems: 8
+    maxItems: 8
+  clocks:
+    items:
+      - description: DMA bus clock
+      - description: DMAMUX bus clock
+  clock-names:
+    items:
+      - const: dma
+      - const: mux
+  resets:
+    maxItems: 1
+  '#dma-cells':
+    const: 1
+
+required:
+  - compatible
+  - reg
+  - reg-names
+  - interrupts
+  - clocks
+  - clock-names
+  - resets
+  - '#dma-cells'
+
+unevaluatedProperties: false

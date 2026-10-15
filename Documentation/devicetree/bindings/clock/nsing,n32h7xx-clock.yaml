@@ -4,7 +4,7 @@
 $id: http://devicetree.org/schemas/clock/nsing,n32h7xx-clock.yaml#
 $schema: http://devicetree.org/meta-schemas/core.yaml#
 
-title: NSING N32H7xx RCC console, basic timer and USB clocks
+title: NSING N32H7xx RCC peripheral clocks
 
 maintainers:
   - Tobby Tan <tan.bo@nsingtech.com>
@@ -16,6 +16,9 @@ description: |
   4 selects the shared USB PHY reference clock derived from HSE without
   prescaling. Reset index 0 selects BTIM1, indices 1 and 2 select USB1 and
   USB2 core reset, and indices 3 and 4 select their PHY power-on resets.
+  Clock indices 5 and 6 select DMA1 and DMAMUX1. Indices 7 and 8 select
+  the I2S1 and I2S4 kernel clocks from sysbus divided by eight. Reset indices
+  5 and 6 select I2S1 and I2S4, and indices 7 and 8 select DMA1 and DMAMUX1.
 
 properties:
   compatible:

@@ -26,6 +26,7 @@
 		serial0 = &usart1;
 		usb0 = &usb1;
 		usb1 = &usb2;
+		i2c4 = &i2c4;
 	};
 
 	usb2_vbus: regulator-usb2-vbus {
@@ -35,6 +36,32 @@
 		regulator-max-microvolt = <5000000>;
 		gpio = <&gpiob 4 GPIO_ACTIVE_HIGH>;
 		enable-active-high;
+	};
+
+	/* WM8978 control bus on I2C4 pins PD12/PD13. */
+	i2c4: i2c4 {
+		compatible = "i2c-gpio";
+		#address-cells = <1>;
+		#size-cells = <0>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&i2c4_pins>;
+		sda-gpios = <&gpiod 13 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		scl-gpios = <&gpiod 12 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		i2c-gpio,delay-us = <5>;
+
+		wm8978: codec@1a {
+			compatible = "wlf,wm8978";
+			reg = <0x1a>;
+			#sound-dai-cells = <0>;
+		};
+
+	};
+
+	sound {
+		compatible = "nsing,n32h787-wm8978";
+		audio-cpu = <&i2s1>;
+		audio-codec = <&wm8978>;
+		nsing,mclk-frequency = <9375000>;
 	};
 
 	/* The bootloader loads the raw zImage+DTB at the start of the 32 MiB
@@ -78,6 +105,49 @@
  * signal that peripheral has on each pin, or an exact signal name.
  */
 &pinctrl {
+	i2c4_pins: i2c4-pins {
+		pins = "PD12", "PD13";
+		bias-pull-up;
+		drive-strength = <3>;
+	};
+
+	audio_pins: audio-pins {
+		mclk-pins {
+			pins = "PA3";
+			function = "i2s4_mck";
+			bias-disable;
+			drive-strength = <3>;
+			slew-rate = <1>;
+		};
+		bclk-pins {
+			pins = "PA5";
+			function = "i2s1_ck";
+			bias-disable;
+			drive-strength = <0>;
+			slew-rate = <1>;
+		};
+		ws-pins {
+			pins = "PG10";
+			function = "i2s1_ws";
+			bias-disable;
+			drive-strength = <3>;
+			slew-rate = <1>;
+		};
+		data-pins {
+			pins = "PG9";
+			function = "i2s1_sdi";
+			bias-disable;
+			drive-strength = <3>;
+			slew-rate = <1>;
+		};
+		dac-pins {
+			pins = "PD7";
+			function = "i2s1_sdo";
+			bias-disable;
+			drive-strength = <3>;
+			slew-rate = <1>;
+		};
+	};
 	usb1_pins: usb1-pins {
 		pins = "PA11", "PA12";
 		function = "usb1";
@@ -137,6 +207,17 @@
 };
 
 &usb1_phy {
+	status = "okay";
+};
+
+&dma1 {
+	status = "okay";
+};
+
+&i2s1 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&audio_pins>;
+	nsing,ws-monitor = <&gpiog 10 GPIO_ACTIVE_HIGH>;
 	status = "okay";
 };
 

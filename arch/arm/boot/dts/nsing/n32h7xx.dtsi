@@ -63,6 +63,40 @@
 			reg = <0x58031000 0x400>;
 		};
 
+		dma1: dma-controller@40046800 {
+			compatible = "nsing,n32h7xx-dma";
+			reg = <0x40046800 0x400>, <0x40046400 0x20>;
+			reg-names = "dma", "mux";
+			interrupts = <12>, <13>, <14>, <15>, <16>, <17>, <18>, <19>;
+			clocks = <&rcc 5>, <&rcc 6>;
+			clock-names = "dma", "mux";
+			resets = <&rcc 7>;
+			#dma-cells = <1>;
+			status = "disabled";
+		};
+
+		i2s1: audio-controller@400db800 {
+			compatible = "nsing,n32h7xx-i2s";
+			/*
+			 * "rx" is the main block, whose data pin SD carries the
+			 * codec's ADC output; "ext" is I2S1_EXT, whose SD_EXT
+			 * pin carries the codec's DAC input.  The two share CK
+			 * and WS and can be active together.
+			 */
+			reg = <0x400db800 0x40>, <0x400dba00 0x40>,
+			      <0x4000f800 0x40>;
+			reg-names = "rx", "ext", "mclk";
+			clocks = <&rcc 7>, <&rcc 8>;
+			clock-names = "rx", "mclk";
+			resets = <&rcc 5>, <&rcc 6>;
+			reset-names = "rx", "mclk";
+			/* DMAMUX request IDs: I2S1 RX 0xB2-1, I2S1 TX 0xA5-1. */
+			dmas = <&dma1 177>, <&dma1 164>;
+			dma-names = "rx", "tx";
+			#sound-dai-cells = <0>;
+			status = "disabled";
+		};
+
 		usb1_phy: phy@40140000 {
 			compatible = "nsing,n32h7xx-usb-phy";
 			reg = <0x40140000 0x8>;

@@ -13,6 +13,7 @@
 #include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/module.h>
+#include <linux/of.h>
 #include <linux/platform_data/i2c-gpio.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
@@ -614,7 +615,16 @@ static int i2c_gpio_probe(struct platform_device *pdev)
 	adap->dev.parent = dev;
 	device_set_node(&adap->dev, fwnode);
 
-	adap->nr = pdev->id;
+	/*
+	 * Let an "i2cN" alias name the bus, so a bit-banged stand-in for a
+	 * hardware controller keeps that controller's number.  Without one
+	 * fall back to the platform id, which is -1 for DT devices and thus
+	 * selects a dynamically assigned number.
+	 */
+	adap->nr = of_alias_get_id(dev_of_node(dev), "i2c");
+	if (adap->nr < 0)
+		adap->nr = pdev->id;
+
 	ret = i2c_bit_add_numbered_bus(adap);
 	if (ret)
 		goto err_cleanup_scl;

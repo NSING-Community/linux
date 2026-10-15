@@ -790,4 +790,6 @@ config DMATEST
 config DMA_ENGINE_RAID
 	bool
 
+source "drivers/dma/nsing/Kconfig"
+
 endif

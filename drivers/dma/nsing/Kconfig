@@ -1,0 +1,7 @@
+config N32H7XX_DMA
+	tristate "N32H7xx AHB DMA controller"
+	depends on ARCH_NSING && OF
+	select DMA_ENGINE
+	select DMA_VIRTUAL_CHANNELS
+	help
+	  Hardware cyclic slave DMA with per-channel interrupts and DMAMUX routing.

@@ -1,0 +1,18 @@
+config SND_SOC_N32H7XX_I2S
+	tristate "N32H7xx I2S capture and playback"
+	depends on ARCH_NSING && OF
+	select SND_SOC_GENERIC_DMAENGINE_PCM
+	select N32H7XX_DMA
+	help
+	  I2S1 as a codec slave, capture and playback, with I2S4 supplying the
+	  external codec MCLK.  Capture and playback may run simultaneously
+	  at the same sample rate.
+
+config SND_SOC_N32H787_WM8978
+	tristate "N32H787 HMI WM8978 audio"
+	depends on ARCH_NSING && I2C
+	select SND_SOC_N32H7XX_I2S
+	select SND_SOC_WM8978
+	help
+	  WM8978 audio on the HMI board: microphone capture plus headphone and
+	  speaker playback.

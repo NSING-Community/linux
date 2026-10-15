@@ -153,5 +153,7 @@ source "sound/soc/sdw_utils/Kconfig"
 # generic frame-work
 source "sound/soc/generic/Kconfig"
 
+source "sound/soc/nsing/Kconfig"
+
 endif	# SND_SOC
 

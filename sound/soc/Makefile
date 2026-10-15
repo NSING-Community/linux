@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0
+obj-$(CONFIG_SND_SOC) += nsing/
 snd-soc-core-y := soc-core.o soc-dapm.o soc-jack.o soc-utils.o soc-dai.o soc-component.o
 snd-soc-core-y += soc-pcm.o soc-devres.o soc-ops.o soc-link.o soc-card.o
 snd-soc-core-$(CONFIG_SND_SOC_COMPRESS) += soc-compress.o

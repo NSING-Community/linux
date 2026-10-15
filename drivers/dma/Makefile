@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0
+obj-$(CONFIG_N32H7XX_DMA) += nsing/
 #dmaengine debug flags
 subdir-ccflags-$(CONFIG_DMADEVICES_DEBUG)  := -DDEBUG
 subdir-ccflags-$(CONFIG_DMADEVICES_VDEBUG) += -DVERBOSE_DEBUG

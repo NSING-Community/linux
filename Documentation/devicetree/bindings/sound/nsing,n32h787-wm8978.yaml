@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/sound/nsing,n32h787-wm8978.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: NSING N32H787 HMI WM8978 microphone card
+
+maintainers:
+  - Tobby Tan <tan.bo@nsingtech.com>
+
+properties:
+  compatible:
+    const: nsing,n32h787-wm8978
+  audio-cpu:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: I2S capture controller
+  audio-codec:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: WM8978 codec
+  nsing,mclk-frequency:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: MCLK input frequency supplied to the codec PLL
+    minimum: 1000000
+    maximum: 27000000
+
+required:
+  - compatible
+  - audio-cpu
+  - audio-codec
+  - nsing,mclk-frequency
+
+additionalProperties: false

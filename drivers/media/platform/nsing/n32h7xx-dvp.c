@@ -191,6 +191,9 @@ struct n32h7xx_dvp {
 	 */
 	bool			pooled;
 
+	/* The video node only exists once a sensor has bound (see complete). */
+	bool			registered;
+
 	spinlock_t		queue_lock;	/* protects the two below */
 	struct list_head	buffers;	/* queued and not yet armed */
 	struct n32h7xx_dvp_buffer *armed;	/* buffer the hardware writes to */
@@ -1049,14 +1052,13 @@ static int n32h7xx_dvp_notifier_bound(struct v4l2_async_notifier *notifier,
 	 * gain, white balance, the flips and the ISP test pattern.  Lend its
 	 * handler to the video node so they are reachable with the ordinary
 	 * control ioctls on /dev/videoN, without asking userspace to find a
-	 * second device node for the same sensor.
+	 * second device node for the same sensor.  atmel-isi and pxa_camera
+	 * wire a subdev up the same way.
 	 *
-	 * The pointer is picked up per file handle by v4l2_fh_open(), and that
-	 * is also what makes the control ioctls pass the v4l2 core's
-	 * valid_ioctls check: those bits are computed at
-	 * video_register_device() time, when no sensor has bound yet and this
-	 * field is still NULL.  atmel-isi and pxa_camera wire a subdev up the
-	 * same way.
+	 * This runs before the video node is registered, which is what makes
+	 * the control ioctls pass the v4l2 core's valid_ioctls check: those
+	 * bits are computed inside video_register_device() from the handler
+	 * that is current at that moment.
 	 */
 	if (sd->ctrl_handler)
 		dvp->vdev.ctrl_handler = sd->ctrl_handler;
@@ -1089,9 +1091,33 @@ static int n32h7xx_dvp_notifier_complete(struct v4l2_async_notifier *notifier)
 {
 	struct n32h7xx_dvp *dvp = container_of(notifier, struct n32h7xx_dvp,
 					       notifier);
+	int ret;
 
-	dev_info(dvp->dev, "capture device /dev/video%d ready (sensor %s)\n",
-		 dvp->vdev.num, dvp->sensor ? dvp->sensor->name : "?");
+	/*
+	 * The video node is created here rather than in probe, because the
+	 * port is useless without a sensor behind it: a board with the camera
+	 * connector empty would otherwise publish a /dev/videoN that fails
+	 * every S_FMT with -ENODEV and has nothing to stream from, and boot
+	 * scripts that only check for the node would call that a working
+	 * camera.  Registering once the async core has bound the sensor keeps
+	 * the node and the sensor's lifetime together, and it is what lets
+	 * the control handler set up in .bound() be part of the node's
+	 * advertised ioctls.
+	 */
+	if (dvp->registered)
+		return 0;
+
+	ret = video_register_device(&dvp->vdev, VFL_TYPE_VIDEO, -1);
+	if (ret)
+		return dev_err_probe(dvp->dev, ret,
+				     "failed to register the video device\n");
+
+	dvp->registered = true;
+
+	dev_info(dvp->dev, "N32H7xx DVP capture at %pR, irq %d, /dev/video%d (sensor %s)\n",
+		 platform_get_resource(to_platform_device(dvp->dev),
+				       IORESOURCE_MEM, 0),
+		 dvp->irq, dvp->vdev.num, dvp->sensor->name);
 
 	return 0;
 }
@@ -1122,25 +1148,42 @@ static void n32h7xx_dvp_release_pool(void *data)
 static int n32h7xx_dvp_init_budget(struct n32h7xx_dvp *dvp)
 {
 	struct device *dev = dvp->dev;
+	struct device_node *pool;
 	int ret;
 
 	/*
 	 * Claim the reserved pool before anything is allocated from it.  The
 	 * device tree is the contract here: the pool is what makes a frame
 	 * bigger than the page allocator's largest block possible.
+	 *
+	 * The pool is optional, because a board can ship without a capture
+	 * connector and should not lose the SDRAM in that case: leave the
+	 * "memory-region" out, or point it at a disabled reserved-memory node
+	 * and the reservation never happens.  Check the node rather than the
+	 * property, because claiming a region whose node is disabled returns
+	 * success without reserving anything, and the port would then quietly
+	 * run off the global DMA pool.
 	 */
-	if (of_find_property(dev->of_node, "memory-region", NULL)) {
-		ret = of_reserved_mem_device_init(dev);
-		if (ret)
-			return dev_err_probe(dev, ret,
-					     "failed to claim the frame buffer pool\n");
+	pool = of_parse_phandle(dev->of_node, "memory-region", 0);
+	if (pool) {
+		bool reserved = of_device_is_available(pool);
 
-		ret = devm_add_action_or_reset(dev,
-					       n32h7xx_dvp_release_pool, dev);
-		if (ret)
-			return ret;
+		of_node_put(pool);
 
-		dvp->pooled = true;
+		if (reserved) {
+			ret = of_reserved_mem_device_init(dev);
+			if (ret)
+				return dev_err_probe(dev, ret,
+						     "failed to claim the frame buffer pool\n");
+
+			ret = devm_add_action_or_reset(dev,
+						       n32h7xx_dvp_release_pool,
+						       dev);
+			if (ret)
+				return ret;
+
+			dvp->pooled = true;
+		}
 	}
 
 	n32h7xx_dvp_probed_bytes = n32h7xx_dvp_allocatable_bytes(dev,
@@ -1309,25 +1352,27 @@ static int n32h7xx_dvp_probe(struct platform_device *pdev)
 	strscpy(dvp->vdev.name, N32H7XX_DVP_DRV_NAME, sizeof(dvp->vdev.name));
 	video_set_drvdata(&dvp->vdev, dvp);
 
-	ret = video_register_device(&dvp->vdev, VFL_TYPE_VIDEO, -1);
-	if (ret) {
-		dev_err_probe(dev, ret, "failed to register the video device\n");
-		goto err_queue;
-	}
-
+	/*
+	 * Registers the async notifier, not the video node: no sensor, no
+	 * /dev/videoN.  When the sensor is already registered (both drivers
+	 * are built in, so probe order is a linker detail) this calls
+	 * back into n32h7xx_dvp_notifier_complete() before it returns.
+	 */
 	ret = n32h7xx_dvp_register_sensor(dvp);
 	if (ret)
 		goto err_video;
 
 	platform_set_drvdata(pdev, dvp);
 
-	dev_info(dev, "N32H7xx DVP capture at %pR, irq %d, /dev/video%d\n",
-		 &pdev->resource[0], dvp->irq, dvp->vdev.num);
+	if (!dvp->registered)
+		dev_info(dev, "N32H7xx DVP capture at %pR, irq %d: waiting for a sensor\n",
+			 &pdev->resource[0], dvp->irq);
 
 	return 0;
 
 err_video:
-	video_unregister_device(&dvp->vdev);
+	if (dvp->registered)
+		video_unregister_device(&dvp->vdev);
 err_queue:
 	vb2_queue_release(&dvp->queue);
 err_v4l2:
@@ -1342,7 +1387,8 @@ static void n32h7xx_dvp_remove(struct platform_device *pdev)
 
 	v4l2_async_nf_unregister(&dvp->notifier);
 	v4l2_async_nf_cleanup(&dvp->notifier);
-	video_unregister_device(&dvp->vdev);
+	if (dvp->registered)
+		video_unregister_device(&dvp->vdev);
 	vb2_queue_release(&dvp->queue);
 	v4l2_device_unregister(&dvp->v4l2_dev);
 }

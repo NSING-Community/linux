@@ -108,10 +108,19 @@ CONFIG_PINCTRL_N32H7XX=y
 CONFIG_GPIO_SYSFS=y
 CONFIG_GPIO_SYSFS_LEGACY=y
 
-# No PS/2, HID or other input devices are described on this board.
-# CONFIG_INPUT is not set
+# No PS/2 keyboard or mouse is wired on this board, so SERIO stays off.
 # CONFIG_SERIO is not set
-# CONFIG_HID_SUPPORT is not set
+#
+# USB HID is on because USB2 is a host port and CMSIS-DAP probes are often
+# presented as a HID interface rather than the vendor bulk one.  Reaching such
+# a probe needs the HID stack plus /dev/hidrawN, which is what HIDRAW adds;
+# nothing here consumes input events, so EVDEV is not required.
+CONFIG_INPUT=y
+CONFIG_HID_SUPPORT=y
+CONFIG_HID=y
+CONFIG_HID_GENERIC=y
+CONFIG_HIDRAW=y
+CONFIG_USB_HID=y
 # CONFIG_MQ_IOSCHED_KYBER is not set
 # CONFIG_IOSCHED_BFQ is not set
 
@@ -170,3 +179,46 @@ CONFIG_I2C=y
 CONFIG_I2C_GPIO=y
 CONFIG_I2C_CHARDEV=y
 CONFIG_SND_PROC_FS=y
+
+# --- loadable modules -------------------------------------------------------
+# Module loading stays enabled even though this defconfig now builds no .ko of
+# its own (the camera stack included, it is all built in).  The loader is kept
+# for out-of-tree experiment modules and for a product that decides to ship
+# something as a module to save zImage space; NOMMU module loading works on
+# ARMv7-M (modules are REL-relocated and execmem falls back to vmalloc).
+CONFIG_MODULES=y
+CONFIG_MODULE_UNLOAD=y
+CONFIG_MODULE_FORCE_UNLOAD=y
+# These four are tristates whose Kconfig default is "m" the moment modules
+# become possible.  This image has no userland that would load them, so pin
+# them into the kernel instead of silently demoting them to unused modules.
+CONFIG_HW_RANDOM=y
+CONFIG_NET_IP_TUNNEL=y
+CONFIG_INET_TUNNEL=y
+CONFIG_IPV6_SIT=y
+
+# --- camera: V4L2 core + DVP capture + OV5640 sensor ------------------------
+# Only the camera part of the media stack is enabled, and all of it is built
+# in.  A board without a populated camera module simply never probes the
+# sensor, so there is no runtime cost, and the capture path is ready before
+# userspace with no module load at boot.
+CONFIG_MEDIA_SUPPORT=y
+# Keep only the camera part of the media stack.  Without the filter every
+# other front end (DVB, analog TV, radio, SDR) defaults to on and the module
+# build produces ~150 modules, none of which this board can use.
+CONFIG_MEDIA_SUPPORT_FILTER=y
+CONFIG_MEDIA_CAMERA_SUPPORT=y
+# CONFIG_MEDIA_ANALOG_TV_SUPPORT is not set
+# CONFIG_MEDIA_DIGITAL_TV_SUPPORT is not set
+# CONFIG_MEDIA_RADIO_SUPPORT is not set
+# CONFIG_MEDIA_SDR_SUPPORT is not set
+# CONFIG_MEDIA_TEST_SUPPORT is not set
+CONFIG_VIDEO_DEV=y
+CONFIG_MEDIA_CONTROLLER=y
+CONFIG_MEDIA_PLATFORM_SUPPORT=y
+CONFIG_MEDIA_PLATFORM_DRIVERS=y
+CONFIG_V4L_PLATFORM_DRIVERS=y
+CONFIG_V4L2_SUBDEV_API=y
+CONFIG_VIDEO_V4L2_SUBDEV_API=y
+CONFIG_VIDEO_OV5640=y
+CONFIG_VIDEO_N32H7XX_DVP=y

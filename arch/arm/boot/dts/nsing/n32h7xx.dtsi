@@ -332,6 +332,27 @@
 			reg = <0x58005400 0x100>;
 			status = "disabled";
 		};
+
+		/*
+		 * The two parallel camera ports share the same programming model.
+		 * The port itself is programmed by drivers/media/platform/nsing;
+		 * the series-specific power sub-domain, clock, reset and MMU
+		 * sequence lives in arch/arm/mach-nsing.  The sensor behind the
+		 * port is described as an endpoint of the selected node's port.
+		 */
+		dvp1: dvp@50048000 {
+			compatible = "nsing,n32h7xx-dvp";
+			reg = <0x50048000 0x1000>;
+			interrupts = <93>;
+			status = "disabled";
+		};
+
+		dvp2: dvp@50049000 {
+			compatible = "nsing,n32h7xx-dvp";
+			reg = <0x50049000 0x1000>;
+			interrupts = <94>;
+			status = "disabled";
+		};
 	};
 };
 

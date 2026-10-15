@@ -3,6 +3,7 @@
 /dts-v1/;
 
 #include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/media/video-interfaces.h>
 #include "n32h7xx.dtsi"
 
 / {
@@ -38,7 +39,46 @@
 		enable-active-high;
 	};
 
-	/* WM8978 control bus on I2C4 pins PD12/PD13. */
+	/*
+	 * The OV5640 module carries its own 1.8 V / 2.8 V / 1.5 V regulators,
+	 * so the three sensor rails are always on and only exist to satisfy the
+	 * driver's supply lookups.
+	 */
+	ov5640_dovdd: regulator-ov5640-dovdd {
+		compatible = "regulator-fixed";
+		regulator-name = "ov5640-dovdd";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+	};
+
+	ov5640_avdd: regulator-ov5640-avdd {
+		compatible = "regulator-fixed";
+		regulator-name = "ov5640-avdd";
+		regulator-min-microvolt = <2800000>;
+		regulator-max-microvolt = <2800000>;
+	};
+
+	ov5640_dvdd: regulator-ov5640-dvdd {
+		compatible = "regulator-fixed";
+		regulator-name = "ov5640-dvdd";
+		regulator-min-microvolt = <1500000>;
+		regulator-max-microvolt = <1500000>;
+	};
+
+	/* The sensor module's own 24 MHz oscillator: no SoC clock is routed. */
+	clk_ov5640: clock-ov5640 {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <24000000>;
+	};
+
+	/*
+	 * Bit-banged control bus on the SoC I2C4 pins (PD12/PD13).  It is
+	 * shared: the WM8978 codec answers at 0x1a and an OV5640 module on
+	 * either DVP connector answers at 0x3c.  The "i2c4" alias keeps the
+	 * controller number Linux inherits from the pin name, so userspace
+	 * sees the bus as i2c-4.
+	 */
 	i2c4: i2c4 {
 		compatible = "i2c-gpio";
 		#address-cells = <1>;
@@ -55,6 +95,70 @@
 			#sound-dai-cells = <0>;
 		};
 
+		/*
+		 * OV5640 camera module on the DVP1 connector.  It has no
+		 * external clock input on this board: the module carries its
+		 * own 24 MHz oscillator, so "xclk" is a fixed-clock stand-in
+		 * that only tells the driver what rate the sensor is clocked
+		 * at.  Reset is DVP1_RST on PC13 (active low).
+		 *
+		 * The endpoint polarity matches the sensor's own default
+		 * programming: the capture port is fed a stream with HSYNC
+		 * active high, VSYNC active low and the pixel clock sampled on
+		 * the rising edge, which is what the DVP PORTCFG on this board
+		 * is set up for.  Only the low eight data lines are wired, and
+		 * they come from the sensor's D[9:2], so the bus is 8-bit.
+		 */
+		ov5640: camera@3c {
+			compatible = "ovti,ov5640";
+			reg = <0x3c>;
+			clocks = <&clk_ov5640>;
+			clock-names = "xclk";
+			DOVDD-supply = <&ov5640_dovdd>;
+			AVDD-supply = <&ov5640_avdd>;
+			DVDD-supply = <&ov5640_dvdd>;
+			/*
+			 * Ceiling on the parallel byte clock.  The DVP receive
+			 * path on this board is clean up to 96 MHz; above that
+			 * the port starts truncating frames.  Modes that would
+			 * ask for more are run with a slower system clock, which
+			 * lowers PCLK without changing the frame geometry.
+			 */
+			ovti,max-dvp-pclk-hz = <96000000>;
+			/*
+			 * PC13 is the module's RESETB and the only camera control
+			 * line wired: the module has no separate PWDN.  RESETB is
+			 * active low and must be driven high before the sensor
+			 * answers on SCCB.
+			 *
+			 * It is declared here as the powerdown line on purpose.
+			 * ov5640_powerup_sequence() only ever toggles a reset line
+			 * when a powerdown line is present; with reset-gpios alone
+			 * it requests the line asserted (GPIOD_OUT_HIGH on an
+			 * active-low reset = driven low) and never releases it,
+			 * which holds this sensor in reset and makes every SCCB
+			 * transfer fail.  The polarity works out in our favour:
+			 * with GPIO_ACTIVE_LOW the driver's "power up" releases
+			 * RESETB and its "power down" asserts it, including the
+			 * t2/t3/t4 delays from the datasheet.
+			 *
+			 * Do not "correct" this to reset-gpios.
+			 */
+			powerdown-gpios = <&gpioc 13 GPIO_ACTIVE_LOW>;
+			status = "okay";
+
+			port {
+				ov5640_ep: endpoint {
+					remote-endpoint = <&dvp1_ep>;
+					bus-type = <MEDIA_BUS_TYPE_PARALLEL>;
+					bus-width = <8>;
+					data-shift = <2>;
+					hsync-active = <1>;
+					vsync-active = <0>;
+					pclk-sample = <1>;
+				};
+			};
+		};
 	};
 
 	sound {
@@ -75,8 +179,10 @@
 	/*
 	 * The SoC has no IOMMU and this kernel runs without an MMU, so
 	 * dma_alloc_coherent() can only succeed if a pool is reserved up
-	 * front (CONFIG_DMA_GLOBAL_POOL).  One pool backs every on-chip
-	 * DMA master: ETH, SDMMC and USB.
+	 * front (CONFIG_DMA_GLOBAL_POOL).  dma_pool backs every on-chip DMA
+	 * master that has no pool of its own: SDMMC, USB and friends.  ETH
+	 * and the DVP have their own because their buffers are much larger
+	 * than the default pool.
 	 */
 	reserved-memory {
 		#address-cells = <1>;
@@ -93,6 +199,40 @@
 		eth_dma_pool: dma-pool@24000000 {
 			compatible = "shared-dma-pool";
 			reg = <0x24000000 0x00040000>;
+			no-map;
+		};
+
+		/*
+		 * Capture buffers for the DVP port.  The port writes a whole
+		 * frame per buffer and there is no MMU behind it, so every
+		 * buffer is one physically contiguous run; reserving the run
+		 * here is what keeps it available at any point in the board's
+		 * life, long after the general allocator has been chipped down
+		 * to 512 KiB blocks.
+		 *
+		 * 2 MiB, sized from measurement rather than from the port.  FBS
+		 * is a 22-bit size, so a frame *may* reach 4 MiB, but OV5640
+		 * JPEG at 2592x1944 -- the only stream here that wants more
+		 * than the raw formats -- comes back at 0.86-0.90 MiB in real
+		 * scenes, so 2 MiB leaves better than 2x headroom and hands the
+		 * other 2 MiB back to the kernel.  An overflow would not be
+		 * silent: the port stops at the programmed size and raises
+		 * M1OF, which the driver reports as a failed frame.
+		 *
+		 * It ends where the bootloader's DTB slot begins (0xC1E00000,
+		 * BOOT_DTB_LOAD_ADDR in bootloader/CM7/src/boot_app.c).  The
+		 * kernel keeps the flat tree the bootloader handed it for the
+		 * whole run, so the pool must stay clear of that slot or a
+		 * capture would overwrite the live device tree.  The pool keeps
+		 * the top of its old range for that reason and gives up space
+		 * from the bottom, which lets the 2 MiB go back where it is
+		 * still wanted: butted up against the free window that starts
+		 * at 0xC1A00000.  Moving the DTB means moving this pool with
+		 * it.
+		 */
+		cam_dma_pool: dma-pool@c1c00000 {
+			compatible = "shared-dma-pool";
+			reg = <0xc1c00000 0x00200000>;
 			no-map;
 		};
 	};
@@ -203,6 +343,32 @@
 			drive-strength = <2>;
 			slew-rate = <0>;
 		};
+	};
+
+	/*
+	 * DVP2 parallel camera port: eight data lines, pixel clock and the two
+	 * sync signals.  Every pin resolves to its one dvp2_* alternate
+	 * function from the "dvp2" prefix, so the group does not have to spell
+	 * the eight signal names out.
+	 */
+	dvp2_pins: dvp2-pins {
+		pins = "PE2", "PE3", "PK5", "PK6",
+		       "PI14", "PK2", "PK1", "PC3",
+		       "PH5", "PH4", "PF9";
+		function = "dvp2";
+		bias-disable;
+		drive-strength = <3>;
+		slew-rate = <0>;
+	};
+
+	dvp1_pins: dvp1-pins {
+		pins = "PC6", "PC7", "PB13", "PG11",
+		       "PE4", "PB6", "PE5", "PE6",
+		       "PA6", "PA4", "PB7";
+		function = "dvp1";
+		bias-disable;
+		drive-strength = <3>;
+		slew-rate = <0>;
 	};
 };
 
@@ -396,4 +562,26 @@
  */
 &rtc {
 	status = "okay";
+};
+
+/*
+ * DVP1 with the OV5640 on the camera connector.  Capture is one frame at a
+ * time into a V4L2 buffer; see doc/camera.md.
+ */
+&dvp1 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&dvp1_pins>;
+	memory-region = <&cam_dma_pool>;
+	status = "okay";
+
+	port {
+		dvp1_ep: endpoint {
+			remote-endpoint = <&ov5640_ep>;
+			bus-type = <MEDIA_BUS_TYPE_PARALLEL>;
+			bus-width = <8>;
+			hsync-active = <1>;
+			vsync-active = <0>;
+			pclk-sample = <1>;
+		};
+	};
 };

@@ -516,7 +516,16 @@ static bool execmem_validate(struct execmem_info *info)
 {
 	struct execmem_range *r = &info->ranges[EXECMEM_DEFAULT];
 
-	if (!r->alignment || !r->start || !r->end || !pgprot_val(r->pgprot)) {
+	/*
+	 * Without an MMU there is no virtual address space for these fields to
+	 * describe and no page protection to program: execmem_vmalloc() below
+	 * is just vmalloc() and execmem_force_rw() is a no-op, so both the
+	 * fallback __execmem_init() sets up (VMALLOC_START/END, which are 0 on
+	 * !MMU) and PAGE_KERNEL_EXEC (also 0 on !MMU) are unusable without
+	 * anything actually being wrong.
+	 */
+	if (IS_ENABLED(CONFIG_MMU) &&
+	    (!r->alignment || !r->start || !r->end || !pgprot_val(r->pgprot))) {
 		pr_crit("Invalid parameters for execmem allocator, module loading will fail");
 		return false;
 	}

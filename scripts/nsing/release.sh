@@ -20,6 +20,9 @@ srctree=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 #                 <STAGE_DIR>/modules; the top-level project passes that and
 #                 merges it into the rootfs SquashFS image.
 #
+#   CAMERA        1: camera DTB; 0 (default): HMI DTB with camera and its
+#                 reserved memory disabled. Does not change .config.
+#
 #   DEFCONFIG     seed configuration: a name under arch/$ARCH/configs/ or a
 #                 path.  It only *seeds* $BUILD_DIR/.config; a configuration
 #                 the customer edited (make kernel-menuconfig) is kept across
@@ -35,6 +38,18 @@ srctree=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 ARCH=${ARCH:-arm}
 CROSS_COMPILE=${CROSS_COMPILE:-arm-none-eabi-}
 BOARD=${BOARD:-n32h787-hmi}
+CAMERA=${CAMERA:-0}
+dtb_board=$BOARD
+case "$CAMERA" in
+1) ;;
+0)
+	if [ "$BOARD" != n32h787-hmi ]; then
+		echo "release.sh: CAMERA=0 is only supported for BOARD=n32h787-hmi" >&2
+		exit 1
+	fi
+	dtb_board=$BOARD-no-camera ;;
+*) echo "release.sh: CAMERA must be 0 or 1" >&2; exit 1 ;;
+esac
 DEFCONFIG=${DEFCONFIG:-nsing_n32h7xx_defconfig}
 BUILD_DIR=${BUILD_DIR:-$srctree}
 STAGE_DIR=${STAGE_DIR:-$srctree/release}
@@ -81,7 +96,7 @@ mkdir -p "$outdir"
 # Clear only the files we stage.  In the combined project STAGE_DIR is
 # out/kernel, which also holds the out-of-tree build tree in out/kernel/build,
 # so this must never be a blanket removal.
-for staged in zImage "$BOARD.dtb" System.map config SHA256SUMS; do
+for staged in zImage "$dtb_board.dtb" System.map config SHA256SUMS; do
 	rm -f "$outdir/$staged"
 done
 
@@ -94,13 +109,13 @@ else
 fi
 
 image="$bindir/zImage"
-dtb="$dtbdir/$BOARD.dtb"
+dtb="$dtbdir/$dtb_board.dtb"
 
 test -s "$image"
 test -s "$dtb"
 
 cp "$image" "$outdir/zImage"
-cp "$dtb" "$outdir/$BOARD.dtb"
+cp "$dtb" "$outdir/$dtb_board.dtb"
 if [ "$BUILD_DIR" != "$srctree" ]; then
 	cp "$BUILD_DIR/System.map" "$outdir/System.map"
 	cp "$BUILD_DIR/.config" "$outdir/config"
@@ -109,13 +124,13 @@ else
 	cp "$srctree/.config" "$outdir/config"
 fi
 
-(cd "$outdir" && sha256sum zImage "$BOARD.dtb" \
+(cd "$outdir" && sha256sum zImage "$dtb_board.dtb" \
 	System.map config > SHA256SUMS)
 
 # The version is only reported, never used to build a path.
 printf 'kernel:  %s\n' "$(make -s -C "$srctree" $make_args kernelrelease)"
 printf 'stage:   %s\n' "$outdir"
 printf 'zImage:  %s (%s bytes)\n' "$outdir/zImage" "$(wc -c <"$outdir/zImage")"
-printf 'dtb:     %s (%s bytes)\n' "$outdir/$BOARD.dtb" "$(wc -c <"$outdir/$BOARD.dtb")"
+printf 'dtb:     %s (%s bytes)\n' "$outdir/$dtb_board.dtb" "$(wc -c <"$outdir/$dtb_board.dtb")"
 printf 'modules: %s (%s .ko)\n' "$MODULES_DIR" \
 	"$(find "$MODULES_DIR" -name '*.ko' | wc -l)"

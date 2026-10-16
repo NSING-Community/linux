@@ -1,0 +1,15 @@
+// SPDX-License-Identifier: GPL-2.0-only
+#include "n32h787-hmi.dts"
+
+/* A board configuration without camera capture returns the pool to Linux. */
+&cam_dma_pool {
+	status = "disabled";
+};
+
+&dvp1 {
+	status = "disabled";
+};
+
+&ov5640 {
+	status = "disabled";
+};

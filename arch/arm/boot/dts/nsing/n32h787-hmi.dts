@@ -2,6 +2,21 @@
 
 /dts-v1/;
 
+/*
+ * The bootloader loads the flat device tree into the "dtb" partition slot in
+ * SDRAM and hands Linux the address in r2; the kernel then keeps the blob for
+ * the whole run, because initial_boot_params points into it and
+ * /sys/firmware/fdt hands it out verbatim.  The bootloader also makes the
+ * whole slot read-only in the MPU at hand-off, so reserve the same 64 KiB
+ * here: the page allocator would otherwise hand out the tail of the slot past
+ * fdt_totalsize() and the first store into it would take a MemManage fault.
+ *
+ * The address, the size, BOOT_DTB_LOAD_ADDR and BOOT_PART_DTB_MAX in
+ * bootloader/CM7/src/boot_app.c, and the end of cam_dma_pool below all
+ * describe the same slot and have to move together.
+ */
+/memreserve/ 0xc1e00000 0x00010000;
+
 #include <dt-bindings/gpio/gpio.h>
 #include <dt-bindings/media/video-interfaces.h>
 #include "n32h7xx.dtsi"

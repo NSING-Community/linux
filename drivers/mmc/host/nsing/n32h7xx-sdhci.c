@@ -12,6 +12,8 @@
 #include <linux/err.h>
 #include <linux/io.h>
 #include <linux/mmc/host.h>
+#include <linux/mmc/mmc.h>
+#include <linux/mmc/sd.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
@@ -125,6 +127,32 @@ static unsigned int n32h7xx_sdhci_get_max_clock(struct sdhci_host *host)
 	return n32h7xx_sdmmc1_soc_clock_rate();
 }
 
+static bool n32h7xx_sdhci_is_empty_slot_probe(struct sdhci_host *host)
+{
+	struct mmc_command *cmd = host->cmd;
+
+	/*
+	 * H787 has no card-detect connection to the SoC, so broken-cd makes
+	 * the MMC core probe an empty slot periodically.  Give those commands
+	 * a hardware timeout so an absent card completes with -ETIMEDOUT
+	 * without taking the generic software-timeout path, which prints a
+	 * register dump for a controller failure that did not happen.
+	 */
+	if (!cmd || !(host->mmc->caps & MMC_CAP_NEEDS_POLL) || host->mmc->card)
+		return false;
+
+	switch (cmd->opcode) {
+	case MMC_GO_IDLE_STATE:
+	case SD_SEND_IF_COND:
+	case MMC_APP_CMD:
+	case SD_APP_OP_COND:
+	case MMC_SEND_OP_COND:
+		return true;
+	default:
+		return false;
+	}
+}
+
 static void n32h7xx_sdhci_set_power(struct sdhci_host *host, unsigned char mode,
 				    unsigned short vdd)
 {
@@ -178,6 +206,9 @@ static void n32h7xx_sdhci_writew(struct sdhci_host *host, u16 val, int reg)
 		pltfm_host->xfer_mode_shadow = val;
 		return;
 	case SDHCI_COMMAND:
+		if (n32h7xx_sdhci_is_empty_slot_probe(host))
+			sdhci_writeb(host, host->max_timeout_count,
+				     SDHCI_TIMEOUT_CONTROL);
 		writel((val << 16) | pltfm_host->xfer_mode_shadow,
 		       host->ioaddr + SDHCI_TRANSFER_MODE);
 		return;

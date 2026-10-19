@@ -353,6 +353,33 @@
 			interrupts = <94>;
 			status = "disabled";
 		};
+
+		/*
+		 * The JPEG codec is independent of both DVP ports: it takes a
+		 * planar pixel buffer through the H2P SGDMA and returns JPEG
+		 * through P2H (and vice versa for decode).  GRAPHICS power is
+		 * shared with DVP, but each peripheral has its own memory gate.
+		 */
+		jpeg: jpeg@50060000 {
+			compatible = "nsing,n32h7xx-jpeg";
+			reg = <0x50060000 0x10000>,
+			      <0x50070000 0x100>,
+			      <0x50070400 0x100>,
+			      <0x50080000 0x1000>,
+			      <0x50090000 0x100>,
+			      <0x50090400 0x100>,
+			      <0x50090800 0x100>;
+			reg-names = "encoder", "encoder-rbc", "encoder-sgdma",
+				    "decoder", "decoder-brc", "decoder-sgdma",
+				    "common";
+			interrupts = <169>, <170>;
+			interrupt-names = "encoder-sgdma", "decoder-sgdma";
+			clocks = <&rcc 9>, <&rcc 10>;
+			clock-names = "encoder", "decoder";
+			resets = <&rcc 9>, <&rcc 10>;
+			reset-names = "encoder", "decoder";
+			status = "disabled";
+		};
 	};
 };
 

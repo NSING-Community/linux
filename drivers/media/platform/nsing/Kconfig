@@ -2,6 +2,17 @@
 
 comment "NSING media platform drivers"
 
+config VIDEO_N32H7XX_JPEG
+	tristate "NSING N32H7xx JPEG codec"
+	depends on ARCH_NSING || COMPILE_TEST
+	help
+	  Support the N32H7xx hardware JPEG encoder and decoder through the
+	  /dev/jpeg character device and libn32jpeg.  The initial interface
+	  supports synchronous GREY8 encoding.
+
+	  To compile this driver as a module, choose M here: the module will be
+	  called n32h7xx-jpeg.
+
 config VIDEO_N32H7XX_DVP
 	tristate "NSING N32H7xx DVP parallel camera capture"
 	depends on V4L_PLATFORM_DRIVERS && VIDEO_DEV

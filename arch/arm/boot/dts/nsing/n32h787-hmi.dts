@@ -195,8 +195,8 @@
 	 * The SoC has no IOMMU and this kernel runs without an MMU, so
 	 * dma_alloc_coherent() can only succeed if a pool is reserved up
 	 * front (CONFIG_DMA_GLOBAL_POOL).  dma_pool backs every on-chip DMA
-	 * master that has no pool of its own: SDMMC, USB and friends.  ETH
-	 * and the DVP have their own because their buffers are much larger
+	 * master that has no pool of its own: SDMMC, USB and friends.  ETH,
+	 * the DVP and JPEG have their own because their buffers are much larger
 	 * than the default pool.
 	 */
 	reserved-memory {
@@ -248,6 +248,13 @@
 		cam_dma_pool: dma-pool@c1c00000 {
 			compatible = "shared-dma-pool";
 			reg = <0xc1c00000 0x00200000>;
+			no-map;
+		};
+
+		/* Scanline, descriptor and coefficient storage for the JPEG codec. */
+		jpeg_dma_pool: dma-pool@c1e10000 {
+			compatible = "shared-dma-pool";
+			reg = <0xc1e10000 0x00100000>;
 			no-map;
 		};
 	};
@@ -599,4 +606,10 @@
 			pclk-sample = <1>;
 		};
 	};
+};
+
+/* The hardware JPEG codec is independent of camera capture. */
+&jpeg {
+	memory-region = <&jpeg_dma_pool>;
+	status = "okay";
 };

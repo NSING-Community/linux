@@ -13,7 +13,7 @@
 #define N32H7XX_APB1EN3  0x88
 #define N32H7XX_APB1EN1 0x80
 #define N32H7XX_APB1RST1 0x94
-#define N32H7XX_NUM_CLOCKS 9
+#define N32H7XX_NUM_CLOCKS 11
 
 static DEFINE_SPINLOCK(n32h7xx_rcc_lock);
 
@@ -113,10 +113,11 @@ static int n32h7xx_reset_update(struct reset_controller_dev *rcdev,
 {
 	struct n32h7xx_rcc *rcc = container_of(rcdev, struct n32h7xx_rcc, resets);
 	static const u32 regs[] = { N32H7XX_APB1RST1, 0xb4, 0x64,
-				   0xb4, 0x64, 0xd8, 0xa0, 0x6c, 0x64 };
+				   0xb4, 0x64, 0xd8, 0xa0, 0x6c, 0x64,
+				   0x150, 0x150 };
 	static const u32 masks[] = { BIT(28), BIT(20), BIT(20),
 				    BIT(21), BIT(21), BIT(28), BIT(24),
-				    BIT(16), BIT(16) };
+				    BIT(16), BIT(16), BIT(20), BIT(28) };
 	void __iomem *reg;
 	unsigned long flags;
 	u32 val;
@@ -167,10 +168,13 @@ static void __init n32h7xx_clk_init(struct device_node *np)
 	static const char * const names[] = { "n32h7xx-usart1", "n32h7xx-btim1",
 					    "n32h7xx-usb1", "n32h7xx-usb2",
 					    NULL, "n32h7xx-dma1", "n32h7xx-dmamux1",
-					    "n32h7xx-i2s1", "n32h7xx-i2s4" };
+					    "n32h7xx-i2s1", "n32h7xx-i2s4",
+					    "n32h7xx-jpeg-encoder",
+					    "n32h7xx-jpeg-decoder" };
 	static const u32 enable_regs[] = { 0x88, 0x80, 0xb0, 0x54, 0,
-					  0x5c, 0x54, 0xc8, 0x8c };
-	static const u8 gate_shifts[] = { 31, 31, 23, 23, 0, 19, 19, 31, 27 };
+					  0x5c, 0x54, 0xc8, 0x8c, 0x140, 0x140 };
+	static const u8 gate_shifts[] = { 31, 31, 23, 23, 0, 19, 19, 31, 27,
+					 23, 31 };
 	struct clk_init_data init = {
 		.ops = &n32h7xx_periph_clk_ops,
 		.parent_names = &parent,
@@ -203,8 +207,8 @@ static void __init n32h7xx_clk_init(struct device_node *np)
 		clk->divider_reg = N32H7XX_APB1DIV1;
 		clk->divider_shift = i ? 24 : 28;
 		clk->gate_shift = gate_shifts[i];
-		clk->bus_clock = i >= 2 && i < 7;
-		if (i >= 7) {
+		clk->bus_clock = (i >= 2 && i < 7) || i >= 9;
+		if (i == 7 || i == 8) {
 			clk->i2s_clock = true;
 			clk->divider_reg = i == 7 ? 0xb8 : 0x74;
 			clk->divider_shift = i == 7 ? 16 : 8;
@@ -234,7 +238,7 @@ static void __init n32h7xx_clk_init(struct device_node *np)
 	}
 	rcc->resets.ops = &n32h7xx_reset_ops;
 	rcc->resets.of_node = np;
-	rcc->resets.nr_resets = 9;
+	rcc->resets.nr_resets = N32H7XX_NUM_CLOCKS;
 	ret = reset_controller_register(&rcc->resets);
 	if (ret)
 		goto unregister;

@@ -4,8 +4,8 @@
  *
  * The DVP capture units themselves are programmed by
  * drivers/media/platform/nsing/n32h7xx-dvp.c.  Everything that is a property
- * of the N32H7xx series rather than of the DVP logic lives here: the GRAPHICS
- * power sub-domain that feeds DVP1/DVP2, the APB6/AXI clock gates, the DVP
+ * of the N32H7xx series rather than of the DVP logic lives here: the shared
+ * GRAPHICS power-domain reference, the APB6/AXI clock gates, the DVP
  * module clock divider and mux, the peripheral reset, and the MMU module
  * memory bit that lets the DVP AHB master reach SDRAM.
  *
@@ -20,14 +20,12 @@
 #include <linux/device.h>
 #include <linux/errno.h>
 #include <linux/io.h>
-#include <linux/iopoll.h>
 #include <linux/of.h>
-#include <linux/printk.h>
 #include <linux/soc/nsing/n32h7xx-dvp.h>
+#include <linux/soc/nsing/n32h7xx-graphics.h>
 
 /* AHB5/AHB6 register blocks touched here. */
 #define N32H7XX_RCC_BASE		0x58030000
-#define N32H7XX_PWR_BASE		0x58031000
 #define N32H7XX_MMU_BASE		0x51050000
 
 #define N32H7XX_DVP1_BASE		0x50048000
@@ -59,30 +57,15 @@
 #define N32H7XX_RCC_CFG2_M7MMU		(BIT(23) | BIT(22))
 #define N32H7XX_RCC_CFG4_APB6CLKEN	BIT(19)
 
-/* PWR: the DVP memory gate and the GRAPHICS sub-domain that feeds DVP1/DVP2. */
-#define N32H7XX_PWR_SYSCTRL3		0x4c
-#define N32H7XX_PWR_IPMEMCTRL		0x58
-#define N32H7XX_PWR_IPMEMCTRLSTS	0x5c
-
-#define N32H7XX_PWR_IPMEMCTRL_DVP	BIT(4)
-#define N32H7XX_PWR_IPMEMCTRLSTS_DVP	BIT(4)
-#define N32H7XX_PWR_GRC_PWREN		BIT(0)
-#define N32H7XX_PWR_GRC_FUCEN		BIT(4)
-#define N32H7XX_PWR_GRC_ISNEN		BIT(8)
-#define N32H7XX_PWR_GRC_PWRRDY		BIT(16)
-#define N32H7XX_PWR_GRC_PSWACK1		BIT(20)
-
 /* MMU: per-master module-memory enable, bit 0 = EN. */
 #define N32H7XX_MMU_DVP1ME		0x144
 #define N32H7XX_MMU_DVP2ME		0x148
 #define N32H7XX_MMU_ME_EN		BIT(0)
 
-#define N32H7XX_DVP_POWER_TIMEOUT_US	100000
 #define N32H7XX_DVP_RESET_SETTLE_US	10
 
 struct n32h7xx_dvp_hw {
 	void __iomem *rcc;
-	void __iomem *pwr;
 	void __iomem *mmu;
 	unsigned int instance;		/* 1 or 2 */
 };
@@ -108,56 +91,6 @@ static int n32h7xx_dvp_instance(struct device_node *np, unsigned int *instance)
 	}
 }
 
-/*
- * DVP1/DVP2 sit in the VDDDMAIN GRAPHICS sub-domain.  The manual lists that
- * domain's switch as software controlled and off out of reset, so until it is
- * on every DVP register reads back as zero and every write is dropped, which
- * looks exactly like a dead peripheral.  Release the DVP memory gate first:
- * on this SoC a memory gate is released by clearing its IPMEMCTRL bit, and the
- * matching IPMEMCTRLSTS bit then reads set once the memory has come up.
- */
-static int n32h7xx_dvp_power(struct device *dev, void __iomem *pwr)
-{
-	u32 reg, val;
-	int ret;
-
-	reg = readl(pwr + N32H7XX_PWR_IPMEMCTRL);
-	writel(reg & ~N32H7XX_PWR_IPMEMCTRL_DVP, pwr + N32H7XX_PWR_IPMEMCTRL);
-
-	ret = readl_poll_timeout(pwr + N32H7XX_PWR_IPMEMCTRLSTS, val,
-				 val & N32H7XX_PWR_IPMEMCTRLSTS_DVP, 10,
-				 N32H7XX_DVP_POWER_TIMEOUT_US);
-	if (ret)
-		return dev_err_probe(dev, ret,
-				     "DVP memory power did not become ready\n");
-
-	if (readl(pwr + N32H7XX_PWR_SYSCTRL3) & N32H7XX_PWR_GRC_PWRRDY)
-		return 0;
-
-	/* Select the switcher mode, then enable the domain power. */
-	reg = readl(pwr + N32H7XX_PWR_SYSCTRL3);
-	writel(reg | N32H7XX_PWR_GRC_PSWACK1, pwr + N32H7XX_PWR_SYSCTRL3);
-
-	reg = readl(pwr + N32H7XX_PWR_SYSCTRL3);
-	writel(reg | N32H7XX_PWR_GRC_PWREN, pwr + N32H7XX_PWR_SYSCTRL3);
-
-	ret = readl_poll_timeout(pwr + N32H7XX_PWR_SYSCTRL3, val,
-				 val & N32H7XX_PWR_GRC_PWRRDY, 10,
-				 N32H7XX_DVP_POWER_TIMEOUT_US);
-	if (ret)
-		return dev_err_probe(dev, ret,
-				     "GRAPHICS power domain did not become ready\n");
-
-	/* Bring the domain out of reset and release its output isolation. */
-	reg = readl(pwr + N32H7XX_PWR_SYSCTRL3);
-	writel(reg | N32H7XX_PWR_GRC_FUCEN, pwr + N32H7XX_PWR_SYSCTRL3);
-
-	reg = readl(pwr + N32H7XX_PWR_SYSCTRL3);
-	writel(reg | N32H7XX_PWR_GRC_ISNEN, pwr + N32H7XX_PWR_SYSCTRL3);
-
-	return 0;
-}
-
 int n32h7xx_dvp_soc_init(struct device *dev)
 {
 	struct device_node *np = dev->of_node;
@@ -170,12 +103,11 @@ int n32h7xx_dvp_soc_init(struct device *dev)
 		return dev_err_probe(dev, ret, "unknown DVP instance\n");
 
 	hw.rcc = devm_ioremap(dev, N32H7XX_RCC_BASE, 0x400);
-	hw.pwr = devm_ioremap(dev, N32H7XX_PWR_BASE, 0x400);
 	hw.mmu = devm_ioremap(dev, N32H7XX_MMU_BASE, 0x400);
-	if (!hw.rcc || !hw.pwr || !hw.mmu)
+	if (!hw.rcc || !hw.mmu)
 		return -ENOMEM;
 
-	ret = n32h7xx_dvp_power(dev, hw.pwr);
+	ret = n32h7xx_graphics_acquire(dev, N32H7XX_GRAPHICS_DVP);
 	if (ret)
 		return ret;
 

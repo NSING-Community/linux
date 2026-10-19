@@ -17,10 +17,10 @@ struct device;
 
 /*
  * Bring the DVP instance described by the device tree node out of reset:
- * release its memory power gate together with the GRAPHICS sub-domain, open
- * the AHB/APB clocks and the module-memory view, then pulse the peripheral
- * reset.  Returns 0 on success or a negative errno.  Safe to call more than
- * once.
+ * acquire its reference to the shared GRAPHICS power domain and DVP memory
+ * gate, open the AHB/APB clocks and the module-memory view, then pulse the
+ * peripheral reset.  The reference is released automatically at device
+ * removal.  Returns 0 on success or a negative errno.
  */
 int n32h7xx_dvp_soc_init(struct device *dev);
 

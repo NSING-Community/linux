@@ -1,0 +1,42 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+/*
+ * A board configuration without LCD or GPU support returns the shared 4 MiB
+ * graphics pool to Linux.  Disabling the devices as well prevents either DRM
+ * driver from probing without a pool and leaves no active panel/backlight
+ * references behind.
+ */
+&graphics_dma_pool {
+	status = "disabled";
+};
+
+/*
+ * Without the LCD there is no 4 MiB pool under the DTB slot, so keep the
+ * capture pool at the top of the band.  With CAMERA=1 the window from
+ * 0xC0000000 to 0xC1BFFFFF then stays one contiguous run; with CAMERA=0 the
+ * node is disabled and the whole band is free.  A disabled reserved-memory
+ * node is skipped by the kernel, so the graphics node's reg is inert here.
+ */
+&cam_dma_pool {
+	reg = <0xc1c00000 0x00200000>;
+};
+
+&lcdc {
+	status = "disabled";
+};
+
+&gpu {
+	status = "disabled";
+};
+
+&panel {
+	status = "disabled";
+};
+
+&lcd_backlight {
+	status = "disabled";
+};
+
+&lcd_power {
+	status = "disabled";
+};

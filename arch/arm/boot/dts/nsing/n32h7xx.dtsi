@@ -50,12 +50,32 @@
 	};
 
 	soc {
+		lcdc: display-controller@5004a000 {
+			compatible = "nsing,n32h7xx-lcdc";
+			reg = <0x5004a000 0x800>;
+			interrupts = <91>, <92>;
+			interrupt-names = "event", "error";
+			clocks = <&rcc 11>, <&rcc 12>, <&rcc 14>;
+			clock-names = "bus", "apb", "pixel";
+			resets = <&rcc 11>;
+			status = "disabled";
+		};
+
+		gpu: gpu@50040000 {
+			compatible = "nsing,n32h7xx-gpu";
+			reg = <0x50040000 0x1000>;
+			interrupts = <133>;
+			clocks = <&rcc 13>;
+			resets = <&rcc 13>;
+			status = "disabled";
+		};
+
 		rcc: clock-controller@58030000 {
 			compatible = "nsing,n32h7xx-clock";
 			reg = <0x58030000 0x400>;
 			#clock-cells = <1>;
 			#reset-cells = <1>;
-			clocks = <&clk_ahb1>, <&clk_hse>;
+			clocks = <&clk_ahb1>, <&clk_hse>, <&clk_axi>;
 		};
 
 		pwr: syscon@58031000 {

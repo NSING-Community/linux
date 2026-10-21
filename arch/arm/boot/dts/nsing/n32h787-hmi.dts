@@ -11,9 +11,10 @@
  * here: the page allocator would otherwise hand out the tail of the slot past
  * fdt_totalsize() and the first store into it would take a MemManage fault.
  *
- * The address, the size, BOOT_DTB_LOAD_ADDR and BOOT_PART_DTB_MAX in
- * bootloader/CM7/src/boot_app.c, and the end of cam_dma_pool below all
- * describe the same slot and have to move together.
+ * The address and size here, BOOT_DTB_LOAD_ADDR and BOOT_PART_DTB_MAX in
+ * bootloader/CM7/src/boot_app.c, and the bootloader's read-only MPU region
+ * all describe the same slot and have to move together.  No reserved pool
+ * may overlap it.
  */
 /memreserve/ 0xc1e00000 0x00010000;
 
@@ -43,6 +44,46 @@
 		usb0 = &usb1;
 		usb1 = &usb2;
 		i2c4 = &i2c4;
+	};
+
+	lcd_power: regulator-lcd {
+		compatible = "regulator-fixed";
+		regulator-name = "lcd-3v3";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+	};
+
+	lcd_backlight: backlight {
+		compatible = "gpio-backlight";
+		gpios = <&gpioh 3 GPIO_ACTIVE_HIGH>;
+	};
+
+	panel: panel {
+		compatible = "nsing,n32h787-hmi-lcd", "panel-dpi";
+		power-supply = <&lcd_power>;
+		enable-gpios = <&gpiob 10 GPIO_ACTIVE_HIGH>;
+		backlight = <&lcd_backlight>;
+		/* Same AXI / 8 and porch values as the 800x480 GPU example. */
+		panel-timing {
+			clock-frequency = <37500000>;
+			hactive = <800>;
+			vactive = <480>;
+			hsync-len = <34>;
+			hback-porch = <46>;
+			hfront-porch = <210>;
+			vsync-len = <10>;
+			vback-porch = <23>;
+			vfront-porch = <22>;
+			hsync-active = <0>;
+			vsync-active = <0>;
+			de-active = <0>;
+			pixelclk-active = <1>;
+		};
+		port {
+			panel_in: endpoint {
+				remote-endpoint = <&lcdc_out>;
+			};
+		};
 	};
 
 	usb2_vbus: regulator-usb2-vbus {
@@ -204,19 +245,6 @@
 		#size-cells = <1>;
 		ranges;
 
-		dma_pool: dma-pool@c1f80000 {
-			compatible = "shared-dma-pool";
-			reg = <0xc1f80000 0x00080000>;
-			no-map;
-			linux,dma-default;
-		};
-
-		eth_dma_pool: dma-pool@24000000 {
-			compatible = "shared-dma-pool";
-			reg = <0x24000000 0x00040000>;
-			no-map;
-		};
-
 		/*
 		 * Capture buffers for the DVP port.  The port writes a whole
 		 * frame per buffer and there is no MMU behind it, so every
@@ -234,20 +262,34 @@
 		 * silent: the port stops at the programmed size and raises
 		 * M1OF, which the driver reports as a failed frame.
 		 *
-		 * It ends where the bootloader's DTB slot begins (0xC1E00000,
-		 * BOOT_DTB_LOAD_ADDR in bootloader/CM7/src/boot_app.c).  The
+		 * This is the lowest reservation in the SDRAM band on purpose.
+		 * With CAMERA=0 the node is disabled, and because nothing sits
+		 * below it the 2 MiB joins the main RAM window instead of
+		 * becoming an island between two reserved pools.  The no-display
+		 * variant moves it to the top of the band, where the graphics
+		 * pool below it no longer exists; see
+		 * n32h787-hmi-no-display.dtsi.
+		 *
+		 * It stays clear of the bootloader's DTB slot at 0xC1E00000
+		 * (BOOT_DTB_LOAD_ADDR in bootloader/CM7/src/boot_app.c).  The
 		 * kernel keeps the flat tree the bootloader handed it for the
-		 * whole run, so the pool must stay clear of that slot or a
-		 * capture would overwrite the live device tree.  The pool keeps
-		 * the top of its old range for that reason and gives up space
-		 * from the bottom, which lets the 2 MiB go back where it is
-		 * still wanted: butted up against the free window that starts
-		 * at 0xC1A00000.  Moving the DTB means moving this pool with
-		 * it.
+		 * whole run, so a capture must never overwrite that slot.
 		 */
-		cam_dma_pool: dma-pool@c1c00000 {
+		cam_dma_pool: dma-pool@c1800000 {
 			compatible = "shared-dma-pool";
-			reg = <0xc1c00000 0x00200000>;
+			reg = <0xc1800000 0x00200000>;
+			no-map;
+		};
+
+		/*
+		 * Shared allocation bitmap for LCDC scanout and GPU GEM buffers.
+		 * Kept above the capture pool so the optional pool can be given
+		 * back without leaving a hole; the no-display variant removes
+		 * this pool entirely instead of moving it.
+		 */
+		graphics_dma_pool: dma-pool@c1a00000 {
+			compatible = "shared-dma-pool";
+			reg = <0xc1a00000 0x00400000>;
 			no-map;
 		};
 
@@ -255,6 +297,19 @@
 		jpeg_dma_pool: dma-pool@c1e10000 {
 			compatible = "shared-dma-pool";
 			reg = <0xc1e10000 0x00100000>;
+			no-map;
+		};
+
+		dma_pool: dma-pool@c1f80000 {
+			compatible = "shared-dma-pool";
+			reg = <0xc1f80000 0x00080000>;
+			no-map;
+			linux,dma-default;
+		};
+
+		eth_dma_pool: dma-pool@24000000 {
+			compatible = "shared-dma-pool";
+			reg = <0x24000000 0x00040000>;
 			no-map;
 		};
 	};
@@ -267,6 +322,65 @@
  * signal that peripheral has on each pin, or an exact signal name.
  */
 &pinctrl {
+	lcdc_pins: lcdc-pins {
+		data-pins {
+			pins = "PJ1", "PJ2", "PI11", "PK3", "PK4", "PG7", "PI12", "PI13", "PK7";
+			function = "lcd";
+			bias-pull-up;
+			drive-strength = <2>;
+			slew-rate = <0>;
+		};
+		tolerant-data-pins {
+			pins = "PJ3", "PJ4", "PJ5", "PJ6", "PJ7", "PJ8", "PJ9", "PJ10", "PJ11", "PK0", "PD3", "PJ14", "PJ15", "PB9";
+			function = "lcd";
+			bias-pull-up;
+			drive-strength = <1>;
+			slew-rate = <0>;
+		};
+		lcd-r0-pins {
+			pins = "PI15";
+			function = "lcd_r0";
+			bias-pull-up;
+			drive-strength = <1>;
+			slew-rate = <0>;
+		};
+		lcd-r1-pins {
+			pins = "PJ0";
+			function = "lcd_r1";
+			bias-pull-up;
+			drive-strength = <1>;
+			slew-rate = <0>;
+		};
+		lcd-b0-pins {
+			pins = "PJ12";
+			function = "lcd_b0";
+			bias-pull-up;
+			drive-strength = <1>;
+			slew-rate = <0>;
+		};
+		lcd-b1-pins {
+			pins = "PJ13";
+			function = "lcd_b1";
+			bias-pull-up;
+			drive-strength = <1>;
+			slew-rate = <0>;
+		};
+		lcd-b6-pins {
+			pins = "PA15";
+			function = "lcd_b6";
+			bias-pull-up;
+			drive-strength = <1>;
+			slew-rate = <0>;
+		};
+	};
+
+	lcd_control_pins: lcd-control-pins {
+		pins = "PB10", "PH3";
+		bias-pull-up;
+		drive-strength = <2>;
+		slew-rate = <0>;
+	};
+
 	i2c4_pins: i2c4-pins {
 		pins = "PD12", "PD13";
 		bias-pull-up;
@@ -611,5 +725,23 @@
 /* The hardware JPEG codec is independent of camera capture. */
 &jpeg {
 	memory-region = <&jpeg_dma_pool>;
+	status = "okay";
+};
+
+&lcdc {
+	pinctrl-names = "default";
+	pinctrl-0 = <&lcdc_pins &lcd_control_pins>;
+	memory-region = <&graphics_dma_pool>;
+	status = "okay";
+
+	port {
+		lcdc_out: endpoint {
+			remote-endpoint = <&panel_in>;
+		};
+	};
+};
+
+&gpu {
+	memory-region = <&graphics_dma_pool>;
 	status = "okay";
 };

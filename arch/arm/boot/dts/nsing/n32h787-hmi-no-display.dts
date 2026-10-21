@@ -1,0 +1,3 @@
+// SPDX-License-Identifier: GPL-2.0-only
+#include "n32h787-hmi.dts"
+#include "n32h787-hmi-no-display.dtsi"

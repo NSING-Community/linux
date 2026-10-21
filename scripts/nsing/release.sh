@@ -23,6 +23,10 @@ srctree=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 #   CAMERA        1: camera DTB; 0 (default): HMI DTB with camera and its
 #                 reserved memory disabled. Does not change .config.
 #
+#   LCD           1 (default): LCDC/GPU and their shared 4 MiB pool.
+#                 0: disable both and return that pool to Linux. Does not
+#                 change .config.
+#
 #   DEFCONFIG     seed configuration: a name under arch/$ARCH/configs/ or a
 #                 path.  It only *seeds* $BUILD_DIR/.config; a configuration
 #                 the customer edited (make kernel-menuconfig) is kept across
@@ -39,6 +43,7 @@ ARCH=${ARCH:-arm}
 CROSS_COMPILE=${CROSS_COMPILE:-arm-none-eabi-}
 BOARD=${BOARD:-n32h787-hmi}
 CAMERA=${CAMERA:-0}
+LCD=${LCD:-1}
 dtb_board=$BOARD
 case "$CAMERA" in
 1) ;;
@@ -49,6 +54,16 @@ case "$CAMERA" in
 	fi
 	dtb_board=$BOARD-no-camera ;;
 *) echo "release.sh: CAMERA must be 0 or 1" >&2; exit 1 ;;
+esac
+case "$LCD" in
+1) ;;
+0)
+	if [ "$BOARD" != n32h787-hmi ]; then
+		echo "release.sh: LCD=0 is only supported for BOARD=n32h787-hmi" >&2
+		exit 1
+	fi
+	dtb_board=$dtb_board-no-display ;;
+*) echo "release.sh: LCD must be 0 or 1" >&2; exit 1 ;;
 esac
 DEFCONFIG=${DEFCONFIG:-nsing_n32h7xx_defconfig}
 BUILD_DIR=${BUILD_DIR:-$srctree}

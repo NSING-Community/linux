@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: GPL-2.0-only
+config DRM_N32H7XX_LCDC
+	tristate "NSING N32H7xx LCD controller"
+	depends on DRM && SOC_N32H7XX && OF
+	select DRM_CLIENT_SELECTION
+	select DRM_GEM_DMA_HELPER
+	select DRM_KMS_HELPER
+	select DRM_PANEL_BRIDGE
+	select FB_PROVIDE_GET_FB_UNMAPPED_AREA if FB && !MMU
+	help
+	  Atomic modesetting for the N32H7xx parallel RGB LCD controller.
+	  Supports RGB565 and XRGB8888 framebuffers, including no-MMU systems.
+	  The module is called n32h7xx-lcdc.
+
+config DRM_N32H7XX_GPU
+	tristate "NSING N32H7xx 2D GPU"
+	depends on DRM && SOC_N32H7XX && OF
+	select DRM_GEM_DMA_HELPER
+	help
+	  Render-node driver for the N32H7xx D/AVE HD clear engine. Provides
+	  GEM buffers and synchronous, bounds-checked rectangle fills.
+	  This does not provide OpenGL ES or raw command-stream submission.
+	  The module is called n32h7xx-gpu.

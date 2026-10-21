@@ -3298,6 +3298,7 @@ F:	Documentation/devicetree/bindings/*/nsing,n32h7xx-*.yaml
 F:	arch/arm/boot/dts/nsing/
 F:	arch/arm/configs/nsing_n32h7xx_defconfig
 F:	arch/arm/mach-nsing/
+F:	drivers/gpu/drm/nsing/
 F:	drivers/mmc/host/nsing/
 F:	drivers/net/ethernet/nsing/
 F:	drivers/net/phy/nsing/
@@ -3305,6 +3306,7 @@ F:	drivers/pinctrl/nsing/
 F:	drivers/rtc/nsing/
 F:	drivers/spi/nsing/
 F:	include/linux/soc/nsing/
+F:	include/uapi/drm/n32h7xx_drm.h
 F:	scripts/nsing/
 
 ARM/NUVOTON MA35 ARCHITECTURE

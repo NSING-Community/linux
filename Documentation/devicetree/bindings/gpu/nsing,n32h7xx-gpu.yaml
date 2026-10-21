@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/gpu/nsing,n32h7xx-gpu.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: NSING N32H7xx D/AVE HD 2D GPU
+
+maintainers:
+  - Tobby Tan <tan.bo@nsingtech.com>
+
+description:
+  The GPU executes command streams from contiguous DMA memory. Its DMA pool
+  may be shared with the LCDC. This block has no display output of its own.
+
+properties:
+  compatible:
+    const: nsing,n32h7xx-gpu
+  reg:
+    maxItems: 1
+  interrupts:
+    maxItems: 1
+  clocks:
+    maxItems: 1
+  resets:
+    maxItems: 1
+  memory-region:
+    maxItems: 1
+
+required:
+  - compatible
+  - reg
+  - interrupts
+  - clocks
+  - resets
+  - memory-region
+
+additionalProperties: false

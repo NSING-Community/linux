@@ -1,0 +1,58 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/display/nsing,n32h7xx-lcdc.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: NSING N32H7xx parallel RGB LCD controller
+
+maintainers:
+  - Tobby Tan <tan.bo@nsingtech.com>
+
+description:
+  The LCDC scans linear RGB framebuffers from SDRAM and drives a parallel
+  RGB panel. The shared DMA pool may also be referenced by the on-chip GPU;
+  both masters then allocate from the same pool bitmap.
+
+properties:
+  compatible:
+    const: nsing,n32h7xx-lcdc
+  reg:
+    maxItems: 1
+  interrupts:
+    items:
+      - description: Line and register reload events
+      - description: FIFO underrun and bus errors
+  interrupt-names:
+    items:
+      - const: event
+      - const: error
+  clocks:
+    items:
+      - description: LCDC AXI clock
+      - description: LCDC register bus clock
+      - description: Pixel clock
+  clock-names:
+    items:
+      - const: bus
+      - const: apb
+      - const: pixel
+  resets:
+    maxItems: 1
+  memory-region:
+    maxItems: 1
+  port:
+    $ref: /schemas/graph.yaml#/properties/port
+
+required:
+  - compatible
+  - reg
+  - interrupts
+  - interrupt-names
+  - clocks
+  - clock-names
+  - resets
+  - memory-region
+  - port
+
+additionalProperties: false

@@ -13,7 +13,7 @@
 #define N32H7XX_APB1EN3  0x88
 #define N32H7XX_APB1EN1 0x80
 #define N32H7XX_APB1RST1 0x94
-#define N32H7XX_NUM_CLOCKS 11
+#define N32H7XX_NUM_CLOCKS 15
 
 static DEFINE_SPINLOCK(n32h7xx_rcc_lock);
 
@@ -28,6 +28,7 @@ struct n32h7xx_periph_clk {
 	u8 select_shift;
 	bool bus_clock;
 	bool i2s_clock;
+	bool pixel_clock;
 };
 
 #define to_periph_clk(hw) container_of(hw, struct n32h7xx_periph_clk, hw)
@@ -39,6 +40,15 @@ static int n32h7xx_periph_clk_enable(struct clk_hw *hw)
 	unsigned long flags;
 
 	spin_lock_irqsave(&n32h7xx_rcc_lock, flags);
+	if (clk->pixel_clock) {
+		/* LCDC pixel clock: AXI / 8, without retuning either PLL. */
+		writel(readl(clk->base + 0x13c) & ~GENMASK(13, 12),
+		       clk->base + 0x13c);
+		writel((readl(clk->base + 0x138) & ~GENMASK(15, 12)) |
+		       (4 << 12), clk->base + 0x138);
+		spin_unlock_irqrestore(&n32h7xx_rcc_lock, flags);
+		return 0;
+	}
 	if (clk->i2s_clock) {
 		/* I2S kernel clocks use the sysbus / 8 path. */
 		writel(readl(clk->base + clk->select_reg) &
@@ -62,6 +72,9 @@ static void n32h7xx_periph_clk_disable(struct clk_hw *hw)
 	void __iomem *reg = clk->base + clk->enable_reg;
 	unsigned long flags;
 
+	if (clk->pixel_clock)
+		return;
+
 	spin_lock_irqsave(&n32h7xx_rcc_lock, flags);
 	writel(readl(reg) & ~(BIT(clk->gate_shift) |
 			     BIT(clk->gate_shift - 2)), reg);
@@ -76,7 +89,7 @@ static int n32h7xx_periph_clk_is_enabled(struct clk_hw *hw)
 
 	u32 mask = BIT(clk->gate_shift) | BIT(clk->gate_shift - 2);
 
-	return (val & mask) == mask;
+	return clk->pixel_clock || (val & mask) == mask;
 }
 
 static unsigned long n32h7xx_periph_clk_recalc_rate(struct clk_hw *hw,
@@ -84,6 +97,9 @@ static unsigned long n32h7xx_periph_clk_recalc_rate(struct clk_hw *hw,
 {
 	struct n32h7xx_periph_clk *clk = to_periph_clk(hw);
 	u32 div;
+
+	if (clk->pixel_clock)
+		return parent_rate / 8;
 
 	if (clk->bus_clock)
 		return parent_rate;
@@ -114,15 +130,16 @@ static int n32h7xx_reset_update(struct reset_controller_dev *rcdev,
 	struct n32h7xx_rcc *rcc = container_of(rcdev, struct n32h7xx_rcc, resets);
 	static const u32 regs[] = { N32H7XX_APB1RST1, 0xb4, 0x64,
 				   0xb4, 0x64, 0xd8, 0xa0, 0x6c, 0x64,
-				   0x150, 0x150 };
+				   0x150, 0x150, 0x154, 0, 0x158, 0 };
 	static const u32 masks[] = { BIT(28), BIT(20), BIT(20),
 				    BIT(21), BIT(21), BIT(28), BIT(24),
-				    BIT(16), BIT(16), BIT(20), BIT(28) };
+				    BIT(16), BIT(16), BIT(20), BIT(28),
+				    BIT(24), 0, BIT(0), 0 };
 	void __iomem *reg;
 	unsigned long flags;
 	u32 val;
 
-	if (id >= ARRAY_SIZE(regs))
+	if (id >= ARRAY_SIZE(regs) || !masks[id])
 		return -EINVAL;
 	reg = rcc->clocks[0].base + regs[id];
 	spin_lock_irqsave(&n32h7xx_rcc_lock, flags);
@@ -165,16 +182,20 @@ static void __init n32h7xx_clk_init(struct device_node *np)
 {
 	const char *parent = of_clk_get_parent_name(np, 0);
 	const char *hse = of_clk_get_parent_name(np, 1);
+	const char *axi = of_clk_get_parent_name(np, 2);
 	static const char * const names[] = { "n32h7xx-usart1", "n32h7xx-btim1",
 					    "n32h7xx-usb1", "n32h7xx-usb2",
 					    NULL, "n32h7xx-dma1", "n32h7xx-dmamux1",
 					    "n32h7xx-i2s1", "n32h7xx-i2s4",
 					    "n32h7xx-jpeg-encoder",
-					    "n32h7xx-jpeg-decoder" };
+					    "n32h7xx-jpeg-decoder", "n32h7xx-lcdc",
+					    "n32h7xx-lcdc-apb", "n32h7xx-gpu",
+					    "n32h7xx-lcdc-pixel" };
 	static const u32 enable_regs[] = { 0x88, 0x80, 0xb0, 0x54, 0,
-					  0x5c, 0x54, 0xc8, 0x8c, 0x140, 0x140 };
+					  0x5c, 0x54, 0xc8, 0x8c, 0x140, 0x140,
+					  0x144, 0x144, 0x148, 0x144 };
 	static const u8 gate_shifts[] = { 31, 31, 23, 23, 0, 19, 19, 31, 27,
-					 23, 31 };
+					 23, 31, 27, 23, 3, 27 };
 	struct clk_init_data init = {
 		.ops = &n32h7xx_periph_clk_ops,
 		.parent_names = &parent,
@@ -215,6 +236,8 @@ static void __init n32h7xx_clk_init(struct device_node *np)
 			clk->select_reg = i == 7 ? 0xbc : 0x78;
 			clk->select_shift = i == 7 ? 0 : 2;
 		}
+		clk->pixel_clock = i == 14;
+		init.parent_names = i >= 11 && axi ? &axi : &parent;
 		init.name = names[i];
 		clk->hw.init = &init;
 		/* Preserve early console gates before registering its clock. */

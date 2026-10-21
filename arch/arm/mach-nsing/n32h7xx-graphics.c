@@ -16,9 +16,27 @@
 #include <linux/errno.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
+#include <linux/irqflags.h>
+#include <linux/log2.h>
 #include <linux/mutex.h>
+#include <linux/of.h>
+#include <linux/of_reserved_mem.h>
 #include <linux/slab.h>
+#include <linux/sizes.h>
 #include <linux/soc/nsing/n32h7xx-graphics.h>
+
+#include <asm/cacheflush.h>
+#include <asm/v7m.h>
+
+#define N32H7XX_RCC_BASE		0x58030000
+#define N32H7XX_MMU_BASE		0x51050000
+#define N32H7XX_RCC_CFG2		0x160
+#define N32H7XX_RCC_CFG4		0x168
+#define N32H7XX_RCC_CFG2_M7MMU		GENMASK(23, 22)
+#define N32H7XX_RCC_CFG4_APB6CLKEN	BIT(19)
+#define N32H7XX_MMU_LCDME		0x160
+#define N32H7XX_MMU_GPUME		0x164
+#define N32H7XX_MMU_ME_EN		BIT(0)
 
 #define N32H7XX_PWR_BASE		0x58031000
 #define N32H7XX_PWR_SYSCTRL3		0x4c
@@ -26,6 +44,8 @@
 #define N32H7XX_PWR_IPMEMCTRLSTS	0x5c
 
 #define N32H7XX_PWR_IPMEMCTRL_JPEG	BIT(2)
+#define N32H7XX_PWR_IPMEMCTRL_LCDC	BIT(1)
+#define N32H7XX_PWR_IPMEMCTRL_GPU	BIT(0)
 #define N32H7XX_PWR_IPMEMCTRL_DVP	BIT(4)
 #define N32H7XX_PWR_IPMEMCTRL_GRAPHICS	GENMASK(4, 0)
 
@@ -39,8 +59,10 @@
 
 static DEFINE_MUTEX(n32h7xx_graphics_lock);
 static void __iomem *n32h7xx_graphics_pwr;
+static void __iomem *n32h7xx_graphics_rcc;
+static void __iomem *n32h7xx_graphics_mmu;
 static unsigned int n32h7xx_graphics_users;
-static unsigned int n32h7xx_graphics_module_users[2];
+static unsigned int n32h7xx_graphics_module_users[N32H7XX_GRAPHICS_MODULE_COUNT];
 
 struct n32h7xx_graphics_ref {
 	struct device *dev;
@@ -54,6 +76,10 @@ static u32 n32h7xx_graphics_gate(enum n32h7xx_graphics_module module)
 		return N32H7XX_PWR_IPMEMCTRL_DVP;
 	case N32H7XX_GRAPHICS_JPEG:
 		return N32H7XX_PWR_IPMEMCTRL_JPEG;
+	case N32H7XX_GRAPHICS_LCDC:
+		return N32H7XX_PWR_IPMEMCTRL_LCDC;
+	case N32H7XX_GRAPHICS_GPU:
+		return N32H7XX_PWR_IPMEMCTRL_GPU;
 	default:
 		return 0;
 	}
@@ -227,6 +253,32 @@ int n32h7xx_graphics_acquire(struct device *dev,
 		goto unlock;
 	}
 
+	if (module == N32H7XX_GRAPHICS_LCDC ||
+	    module == N32H7XX_GRAPHICS_GPU) {
+		u32 offset = module == N32H7XX_GRAPHICS_LCDC ?
+			     N32H7XX_MMU_LCDME : N32H7XX_MMU_GPUME;
+
+		if (!n32h7xx_graphics_rcc)
+			n32h7xx_graphics_rcc = ioremap(N32H7XX_RCC_BASE, 0x400);
+		if (!n32h7xx_graphics_mmu)
+			n32h7xx_graphics_mmu = ioremap(N32H7XX_MMU_BASE, 0x400);
+		if (!n32h7xx_graphics_rcc || !n32h7xx_graphics_mmu) {
+			ret = -ENOMEM;
+			if (!n32h7xx_graphics_module_users[module])
+				n32h7xx_graphics_module_disable(gate);
+			goto unlock;
+		}
+		/* Shared APB6/M7 memory gateway, then the master's SDRAM view. */
+		writel(readl(n32h7xx_graphics_rcc + N32H7XX_RCC_CFG4) |
+		       N32H7XX_RCC_CFG4_APB6CLKEN,
+		       n32h7xx_graphics_rcc + N32H7XX_RCC_CFG4);
+		writel(readl(n32h7xx_graphics_rcc + N32H7XX_RCC_CFG2) |
+		       N32H7XX_RCC_CFG2_M7MMU,
+		       n32h7xx_graphics_rcc + N32H7XX_RCC_CFG2);
+		writel(readl(n32h7xx_graphics_mmu + offset) | N32H7XX_MMU_ME_EN,
+		       n32h7xx_graphics_mmu + offset);
+	}
+
 	n32h7xx_graphics_module_users[module]++;
 	n32h7xx_graphics_users++;
 	mutex_unlock(&n32h7xx_graphics_lock);
@@ -238,3 +290,160 @@ unlock:
 	return ret;
 }
 EXPORT_SYMBOL_GPL(n32h7xx_graphics_acquire);
+
+/*
+ * NOMMU ioremap_wc() is an identity mapping, not a cache-attribute change.
+ * Reserve free MPU slots above the bootloader's SDRAM and DTB slots. Keep
+ * them for the life of the system: GEM mappings can survive driver unbind.
+ *
+ * An MPU region has to be naturally aligned to its size, so a pool that is
+ * only aligned to part of its size needs more than one region.  The 4 MiB
+ * shared pool at 0xC1A00000 is 2 MiB aligned: two 2 MiB regions cover it.
+ * Splitting instead of moving the pool keeps the optional capture pool at
+ * the bottom of the reserved band, where disabling it extends main RAM
+ * contiguously rather than leaving an island.
+ */
+#define N32H7XX_GRAPHICS_MPU_CHUNKS	8
+
+static int n32h7xx_graphics_mpu_chunks(const struct reserved_mem *pool,
+				       phys_addr_t *addr, size_t *size, int max)
+{
+	phys_addr_t pos = pool->base;
+	size_t left = pool->size;
+	int count = 0;
+
+	while (left) {
+		size_t chunk = rounddown_pow_of_two(left);
+
+		while (chunk > left || !IS_ALIGNED(pos, chunk))
+			chunk >>= 1;
+		if (chunk < 32)
+			return -EINVAL;
+		if (count == max)
+			return -E2BIG;
+		addr[count] = pos;
+		size[count] = chunk;
+		count++;
+		pos += chunk;
+		left -= chunk;
+	}
+
+	return count;
+}
+
+int n32h7xx_graphics_dma_prepare(struct device *dev)
+{
+	static struct reserved_mem *graphics_pool;
+	struct device_node *node;
+	struct reserved_mem *pool;
+	phys_addr_t chunk_addr[N32H7XX_GRAPHICS_MPU_CHUNKS];
+	size_t chunk_size[N32H7XX_GRAPHICS_MPU_CHUNKS];
+	int regions[N32H7XX_GRAPHICS_MPU_CHUNKS];
+	unsigned long flags;
+	u32 saved_rnr, count;
+	int chunks, i, nregions, region, ret = 0;
+
+	if (IS_ENABLED(CONFIG_MMU) || IS_ENABLED(CONFIG_ARM_MPU))
+		return dev_err_probe(dev, -EOPNOTSUPP,
+				     "graphics DMA requires bootloader-managed MPU\n");
+	node = of_parse_phandle(dev->of_node, "memory-region", 0);
+	if (!node)
+		return -EINVAL;
+	pool = of_reserved_mem_lookup(node);
+	if (!of_device_is_compatible(node, "shared-dma-pool") ||
+	    !of_property_read_bool(node, "no-map"))
+		pool = NULL;
+	of_node_put(node);
+	if (!pool || pool->size < PAGE_SIZE || pool->size > SZ_32M ||
+	    !is_power_of_2(pool->size) || !IS_ALIGNED(pool->base, PAGE_SIZE))
+		return dev_err_probe(dev, -EINVAL, "invalid graphics DMA pool geometry\n");
+
+	chunks = n32h7xx_graphics_mpu_chunks(pool, chunk_addr, chunk_size,
+					     N32H7XX_GRAPHICS_MPU_CHUNKS);
+	if (chunks < 0)
+		return dev_err_probe(dev, chunks,
+				     "cannot describe graphics DMA pool with MPU regions\n");
+
+	mutex_lock(&n32h7xx_graphics_lock);
+	if (graphics_pool) {
+		ret = graphics_pool == pool ? 0 : -EINVAL;
+		goto unlock;
+	}
+	if (!(readl(BASEADDR_V7M_SCB + V7M_SCB_CCR) & V7M_SCB_CCR_DC))
+		goto ready;
+	if (!(readl(BASEADDR_V7M_SCB + MPU_CTRL) & MPU_CTRL_ENABLE)) {
+		ret = -EOPNOTSUPP;
+		goto unlock;
+	}
+	count = (readl(BASEADDR_V7M_SCB + MPU_TYPE) >> 8) & 0xff;
+
+	/* No DMA allocation or userspace mapping can touch this pool yet. */
+	dmac_flush_range((void *)(unsigned long)pool->base,
+			 (void *)(unsigned long)(pool->base + pool->size));
+	dsb(sy);
+	local_irq_save(flags);
+	saved_rnr = readl(BASEADDR_V7M_SCB + PMSAv7_RNR);
+	nregions = 0;
+	for (region = (int)count - 1; region > 8 && nregions < chunks; region--) {
+		u64 base, size;
+		u32 rasr;
+
+		writel(region, BASEADDR_V7M_SCB + PMSAv7_RNR);
+		rasr = readl(BASEADDR_V7M_SCB + PMSAv7_RASR);
+		if (!(rasr & BIT(0))) {
+			regions[nregions++] = region;
+			continue;
+		}
+		size = 1ULL << (((rasr >> 1) & 31) + 1);
+		base = readl(BASEADDR_V7M_SCB + PMSAv7_RBAR) & GENMASK(31, 5);
+		base &= ~(size - 1);
+		/*
+		 * Every region still to be picked has a lower number, so a
+		 * higher-priority region that overlaps any chunk would win.
+		 */
+		for (i = 0; i < chunks; i++) {
+			if (base < chunk_addr[i] + chunk_size[i] &&
+			    chunk_addr[i] < base + size) {
+				ret = -EBUSY;
+				goto restore;
+			}
+		}
+	}
+	if (nregions < chunks) {
+		ret = -ENOSPC;
+	} else {
+		for (i = 0; i < chunks; i++) {
+			/* XN, full access, TEX=1/C=0/B=0: non-cacheable. */
+			u32 attr = BIT(28) | (3 << 24) | BIT(19) |
+				   ((ilog2(chunk_size[i]) - 1) << 1) | BIT(0);
+
+			writel(regions[i], BASEADDR_V7M_SCB + PMSAv7_RNR);
+			writel(chunk_addr[i], BASEADDR_V7M_SCB + PMSAv7_RBAR);
+			writel(attr, BASEADDR_V7M_SCB + PMSAv7_RASR);
+			dsb(sy);
+			isb();
+			if (readl(BASEADDR_V7M_SCB + PMSAv7_RASR) != attr ||
+			    (readl(BASEADDR_V7M_SCB + PMSAv7_RBAR) &
+			     GENMASK(31, 5)) != chunk_addr[i]) {
+				ret = -EIO;
+				goto restore;
+			}
+		}
+	}
+restore:
+	writel(saved_rnr, BASEADDR_V7M_SCB + PMSAv7_RNR);
+	local_irq_restore(flags);
+	if (ret)
+		goto unlock;
+	for (i = 0; i < chunks; i++)
+		dev_info(dev, "graphics DMA pool %pa+%zu non-cacheable, MPU region %d\n",
+			 &chunk_addr[i], chunk_size[i], regions[i]);
+ready:
+	graphics_pool = pool;
+unlock:
+	mutex_unlock(&n32h7xx_graphics_lock);
+	if (ret)
+		dev_err(dev, "cannot establish coherent graphics DMA: %d\n", ret);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(n32h7xx_graphics_dma_prepare);

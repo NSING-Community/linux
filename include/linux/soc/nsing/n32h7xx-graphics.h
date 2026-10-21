@@ -12,6 +12,9 @@ struct device;
 enum n32h7xx_graphics_module {
 	N32H7XX_GRAPHICS_DVP,
 	N32H7XX_GRAPHICS_JPEG,
+	N32H7XX_GRAPHICS_LCDC,
+	N32H7XX_GRAPHICS_GPU,
+	N32H7XX_GRAPHICS_MODULE_COUNT,
 };
 
 /*
@@ -22,5 +25,8 @@ enum n32h7xx_graphics_module {
  */
 int n32h7xx_graphics_acquire(struct device *dev,
 			     enum n32h7xx_graphics_module module);
+
+/* Make the reserved framebuffer/GPU pool coherent on the NOMMU Cortex-M7. */
+int n32h7xx_graphics_dma_prepare(struct device *dev);
 
 #endif /* __LINUX_SOC_NSING_N32H7XX_GRAPHICS_H */

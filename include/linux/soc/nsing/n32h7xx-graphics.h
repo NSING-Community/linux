@@ -5,9 +5,27 @@
 #ifndef __LINUX_SOC_NSING_N32H7XX_GRAPHICS_H
 #define __LINUX_SOC_NSING_N32H7XX_GRAPHICS_H
 
+#include <linux/bits.h>
 #include <linux/types.h>
 
 struct device;
+
+/* AHB6 graphics register block and its shared memory-management unit. */
+#define N32H7XX_RCC_BASE		0x58030000
+#define N32H7XX_MMU_BASE		0x51105000
+
+#define N32H7XX_RCC_CFG2		0x160
+#define N32H7XX_RCC_CFG4		0x168
+#define N32H7XX_RCC_CFG2_M7MMU		(BIT(23) | BIT(22))
+#define N32H7XX_RCC_CFG4_APB6CLKEN	BIT(19)
+
+/* Per-master module-memory gates in the shared GRAPHICS MMU. */
+#define N32H7XX_MMU_DVP1ME		0x144
+#define N32H7XX_MMU_DVP2ME		0x148
+#define N32H7XX_MMU_JPEGME		0x15c
+#define N32H7XX_MMU_LCDME		0x160
+#define N32H7XX_MMU_GPUME		0x164
+#define N32H7XX_MMU_ME_EN		BIT(0)
 
 enum n32h7xx_graphics_module {
 	N32H7XX_GRAPHICS_DVP,

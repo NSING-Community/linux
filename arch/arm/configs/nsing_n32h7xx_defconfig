@@ -56,13 +56,16 @@ CONFIG_FUTEX=y
 # CONFIG_COREDUMP is not set
 CONFIG_DEVTMPFS=y
 CONFIG_DEVTMPFS_MOUNT=y
-# CONFIG_FW_LOADER is not set
+CONFIG_FW_LOADER=y
 CONFIG_PROC_FS=y
 CONFIG_SYSFS=y
 # No tmpfs on this target: CONFIG_SHMEM depends on MMU, and this kernel is
 # no-MMU.  rcS mounts ramfs over /tmp, /run and /var/log instead.
 
-# CONFIG_VT is not set
+CONFIG_VT=y
+# Keep kernel diagnostics on ttyS0; framebuffer console is only needed to
+# bring up and diagnose the LCD.
+CONFIG_VT_CONSOLE=y
 CONFIG_UNIX98_PTYS=y
 # CONFIG_LEGACY_PTYS is not set
 CONFIG_SERIAL_N32H7XX=y
@@ -113,9 +116,12 @@ CONFIG_GPIO_SYSFS_LEGACY=y
 #
 # USB HID is on because USB2 is a host port and CMSIS-DAP probes are often
 # presented as a HID interface rather than the vendor bulk one.  Reaching such
-# a probe needs the HID stack plus /dev/hidrawN, which is what HIDRAW adds;
-# nothing here consumes input events, so EVDEV is not required.
+# HID access uses the HID stack plus /dev/hidrawN.  EVDEV is separate: it
+# exposes the GT911 touchscreen through /dev/input/eventN for LVGL.
 CONFIG_INPUT=y
+CONFIG_INPUT_EVDEV=y
+CONFIG_INPUT_TOUCHSCREEN=y
+CONFIG_TOUCHSCREEN_GOODIX=y
 CONFIG_HID_SUPPORT=y
 CONFIG_HID=y
 CONFIG_HID_GENERIC=y
@@ -231,6 +237,8 @@ CONFIG_DRM_N32H7XX_GPU=y
 CONFIG_DRM_PANEL_SIMPLE=y
 CONFIG_DRM_FBDEV_EMULATION=y
 CONFIG_DRM_CLIENT_DEFAULT_FBDEV=y
+CONFIG_FRAMEBUFFER_CONSOLE=y
+# CONFIG_LOGO is not set
 # NOMMU fbdev mmap needs the generic shared-address callback.
 CONFIG_FB=y
 CONFIG_BACKLIGHT_CLASS_DEVICE=y

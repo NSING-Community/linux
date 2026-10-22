@@ -71,7 +71,10 @@
 #include <linux/bitops.h>
 #include <linux/err.h>
 #include <linux/gpio/driver.h>
+#include <linux/interrupt.h>
 #include <linux/io.h>
+#include <linux/irq.h>
+#include <linux/irqdomain.h>
 #include <linux/kstrtox.h>
 #include <linux/module.h>
 #include <linux/of.h>
@@ -111,10 +114,20 @@
 #define N32H7XX_GPIO_AFH		0x24
 #define N32H7XX_GPIO_DS			0x2c
 
-/* AFIO block: the high-speed pad driver-current bank select bits. */
-#define N32H7XX_AFIO_BASE		0x58032400
+/* AFIO block: EXTI line selection and high-speed pad current settings. */
+#define N32H7XX_AFIO_EXTI_CFG		0x18
 #define N32H7XX_AFIO_HS_DSN		0xe4
 #define N32H7XX_AFIO_HS_DSP		0xf0
+
+/* External interrupt controller used by every GPIO bank. */
+#define N32H7XX_EXTI_RT_CFG		0x00
+#define N32H7XX_EXTI_FT_CFG		0x20
+#define N32H7XX_EXTI_M7IMASK		0x60
+#define N32H7XX_EXTI_M7PEND		0xe0
+#define N32H7XX_EXTI_LINES		16
+
+/* Dedicated lines 0..4, then the shared 5..9 and 10..15 EXTI groups. */
+#define N32H7XX_EXTI_NR_IRQS		7
 
 /* RCC AHB5 gates: the GPIO ports and the AFIO block must be clocked. */
 #define N32H7XX_RCC_BASE		0x58030000
@@ -166,10 +179,18 @@ static const u8 n32h7xx_hs_base[] = {
 
 struct n32h7xx_pinctrl;
 
+struct n32h7xx_irq_group {
+	struct n32h7xx_pinctrl *pctl;
+	unsigned int first;
+	unsigned int last;
+};
+
 struct n32h7xx_gpio_bank {
 	struct gpio_chip chip;
 	void __iomem *base;
 	spinlock_t lock;
+	unsigned int port;
+	u32 irq_type[N32H7XX_PINS_PER_PORT];
 };
 
 struct n32h7xx_pinctrl {
@@ -178,6 +199,10 @@ struct n32h7xx_pinctrl {
 	struct pinctrl_desc desc;
 	void __iomem *base;
 	void __iomem *afio;
+	void __iomem *exti;
+	int exti_owner[N32H7XX_EXTI_LINES];
+	struct n32h7xx_irq_group irq_groups[N32H7XX_EXTI_NR_IRQS];
+	spinlock_t irq_lock;
 	unsigned int *group_pins;
 	struct n32h7xx_gpio_bank *banks;
 	unsigned int nbanks;
@@ -511,6 +536,7 @@ static const struct pinmux_ops n32h7xx_pmx_ops = {
 	.get_function_name	= pinmux_generic_get_function_name,
 	.get_function_groups	= pinmux_generic_get_function_groups,
 	.set_mux		= n32h7xx_set_mux,
+	.function_is_gpio	= pinmux_generic_function_is_gpio,
 	.strict			= true,
 };
 
@@ -767,6 +793,311 @@ static int n32h7xx_gpio_direction_output(struct gpio_chip *chip,
 	return pinctrl_gpio_direction_output(chip, offset);
 }
 
+static void n32h7xx_exti_write_bit(void __iomem *reg, unsigned int line,
+				   bool set)
+{
+	void __iomem *addr = reg + (line / 32) * sizeof(u32);
+	u32 mask = BIT(line % 32);
+
+	if (set)
+		writel(readl(addr) | mask, addr);
+	else
+		writel(readl(addr) & ~mask, addr);
+}
+
+static void n32h7xx_exti_clear_pending(void __iomem *exti,
+				      unsigned int line)
+{
+	writel(BIT(line % 32),
+	       exti + N32H7XX_EXTI_M7PEND + (line / 32) * sizeof(u32));
+}
+
+static void n32h7xx_exti_select(struct n32h7xx_pinctrl *pctl,
+				unsigned int line, unsigned int port)
+{
+	unsigned int offset = N32H7XX_AFIO_EXTI_CFG +
+			      (line / 4) * sizeof(u32);
+	unsigned int shift = (line % 4) * 8;
+	u32 value = line * N32H7XX_NPORTS + port;
+	u32 reg = readl(pctl->afio + offset);
+
+	reg &= ~(0xffU << shift);
+	reg |= value << shift;
+	writel(reg, pctl->afio + offset);
+}
+
+static int n32h7xx_irq_to_trigger(unsigned int type, bool *rising,
+				  bool *falling)
+{
+	switch (type) {
+	case IRQ_TYPE_NONE:
+		*rising = false;
+		*falling = false;
+		return 0;
+	case IRQ_TYPE_EDGE_RISING:
+		*rising = true;
+		*falling = false;
+		return 0;
+	case IRQ_TYPE_EDGE_FALLING:
+		*rising = false;
+		*falling = true;
+		return 0;
+	case IRQ_TYPE_EDGE_BOTH:
+		*rising = true;
+		*falling = true;
+		return 0;
+	default:
+		return -EINVAL;
+	}
+}
+
+/* The caller holds irq_lock because every GPIO bank shares these registers. */
+static void n32h7xx_exti_program_locked(struct n32h7xx_pinctrl *pctl,
+					unsigned int line, unsigned int type)
+{
+	bool rising;
+	bool falling;
+
+	if (WARN_ON_ONCE(n32h7xx_irq_to_trigger(type, &rising, &falling)))
+		return;
+
+	n32h7xx_exti_write_bit(pctl->exti + N32H7XX_EXTI_RT_CFG,
+			       line, rising);
+	n32h7xx_exti_write_bit(pctl->exti + N32H7XX_EXTI_FT_CFG,
+			       line, falling);
+	if (type == IRQ_TYPE_NONE)
+		n32h7xx_exti_write_bit(pctl->exti + N32H7XX_EXTI_M7IMASK,
+				       line, false);
+	n32h7xx_exti_clear_pending(pctl->exti, line);
+}
+
+static int n32h7xx_exti_claim(struct n32h7xx_pinctrl *pctl,
+			      unsigned int line, unsigned int port)
+{
+	int owner = READ_ONCE(pctl->exti_owner[line]);
+
+	if (owner < 0) {
+		WRITE_ONCE(pctl->exti_owner[line], port);
+		n32h7xx_exti_select(pctl, line, port);
+		return 0;
+	}
+
+	return owner == port ? 0 : -EBUSY;
+}
+
+static int n32h7xx_gpio_irq_request_resources(struct irq_data *d)
+{
+	struct gpio_chip *chip = irq_data_get_irq_chip_data(d);
+	struct n32h7xx_gpio_bank *bank = gpiochip_get_data(chip);
+	struct n32h7xx_pinctrl *pctl = dev_get_drvdata(chip->parent);
+	unsigned int line = irqd_to_hwirq(d);
+	unsigned long flags;
+	int ret;
+
+	ret = n32h7xx_gpio_direction_input(chip, line);
+	if (ret)
+		return ret;
+
+	ret = gpiochip_reqres_irq(chip, line);
+	if (ret)
+		return ret;
+
+	spin_lock_irqsave(&pctl->irq_lock, flags);
+	ret = n32h7xx_exti_claim(pctl, line, bank->port);
+	if (!ret)
+		n32h7xx_exti_program_locked(pctl, line, bank->irq_type[line]);
+	spin_unlock_irqrestore(&pctl->irq_lock, flags);
+
+	if (ret)
+		gpiochip_relres_irq(chip, line);
+
+	return ret;
+}
+
+static void n32h7xx_gpio_irq_release_resources(struct irq_data *d)
+{
+	struct gpio_chip *chip = irq_data_get_irq_chip_data(d);
+	struct n32h7xx_gpio_bank *bank = gpiochip_get_data(chip);
+	struct n32h7xx_pinctrl *pctl = dev_get_drvdata(chip->parent);
+	unsigned int line = irqd_to_hwirq(d);
+	unsigned long flags;
+
+	spin_lock_irqsave(&pctl->irq_lock, flags);
+	if (pctl->exti_owner[line] == bank->port) {
+		n32h7xx_exti_write_bit(pctl->exti + N32H7XX_EXTI_M7IMASK,
+				       line, false);
+		n32h7xx_exti_write_bit(pctl->exti + N32H7XX_EXTI_RT_CFG,
+				       line, false);
+		n32h7xx_exti_write_bit(pctl->exti + N32H7XX_EXTI_FT_CFG,
+				       line, false);
+		n32h7xx_exti_clear_pending(pctl->exti, line);
+		WRITE_ONCE(pctl->exti_owner[line], -1);
+	}
+	bank->irq_type[line] = IRQ_TYPE_NONE;
+	spin_unlock_irqrestore(&pctl->irq_lock, flags);
+
+	gpiochip_relres_irq(chip, line);
+}
+
+static void n32h7xx_gpio_irq_ack(struct irq_data *d)
+{
+	struct gpio_chip *chip = irq_data_get_irq_chip_data(d);
+	struct n32h7xx_pinctrl *pctl = dev_get_drvdata(chip->parent);
+	unsigned long flags;
+
+	spin_lock_irqsave(&pctl->irq_lock, flags);
+	n32h7xx_exti_clear_pending(pctl->exti, irqd_to_hwirq(d));
+	spin_unlock_irqrestore(&pctl->irq_lock, flags);
+}
+
+static void n32h7xx_gpio_irq_mask(struct irq_data *d)
+{
+	struct gpio_chip *chip = irq_data_get_irq_chip_data(d);
+	struct n32h7xx_pinctrl *pctl = dev_get_drvdata(chip->parent);
+	unsigned long flags;
+
+	spin_lock_irqsave(&pctl->irq_lock, flags);
+	n32h7xx_exti_write_bit(pctl->exti + N32H7XX_EXTI_M7IMASK,
+			       irqd_to_hwirq(d), false);
+	spin_unlock_irqrestore(&pctl->irq_lock, flags);
+}
+
+static void n32h7xx_gpio_irq_unmask(struct irq_data *d)
+{
+	struct gpio_chip *chip = irq_data_get_irq_chip_data(d);
+	struct n32h7xx_gpio_bank *bank = gpiochip_get_data(chip);
+	struct n32h7xx_pinctrl *pctl = dev_get_drvdata(chip->parent);
+	unsigned int line = irqd_to_hwirq(d);
+	unsigned long flags;
+
+	spin_lock_irqsave(&pctl->irq_lock, flags);
+	if (pctl->exti_owner[line] != bank->port ||
+	    bank->irq_type[line] == IRQ_TYPE_NONE)
+		goto out;
+	n32h7xx_exti_write_bit(pctl->exti + N32H7XX_EXTI_M7IMASK,
+			       line, true);
+out:
+	spin_unlock_irqrestore(&pctl->irq_lock, flags);
+}
+
+static int n32h7xx_gpio_irq_set_type(struct irq_data *d, unsigned int type)
+{
+	struct gpio_chip *chip = irq_data_get_irq_chip_data(d);
+	struct n32h7xx_gpio_bank *bank = gpiochip_get_data(chip);
+	struct n32h7xx_pinctrl *pctl = dev_get_drvdata(chip->parent);
+	unsigned int line = irqd_to_hwirq(d);
+	unsigned long flags;
+	bool rising, falling;
+	int ret;
+
+	ret = n32h7xx_irq_to_trigger(type, &rising, &falling);
+	if (ret)
+		return -EINVAL;
+
+	spin_lock_irqsave(&pctl->irq_lock, flags);
+	if (pctl->exti_owner[line] >= 0 &&
+	    pctl->exti_owner[line] != bank->port)
+		ret = -EBUSY;
+	else {
+		bank->irq_type[line] = type;
+		if (pctl->exti_owner[line] == bank->port)
+			n32h7xx_exti_program_locked(pctl, line, type);
+	}
+	spin_unlock_irqrestore(&pctl->irq_lock, flags);
+
+	return ret;
+}
+
+static irqreturn_t n32h7xx_gpio_irq_handler(int irq, void *dev_id)
+{
+	struct n32h7xx_irq_group *group = dev_id;
+	struct n32h7xx_pinctrl *pctl = group->pctl;
+	unsigned long pending;
+	unsigned int line;
+
+	pending = readl(pctl->exti + N32H7XX_EXTI_M7PEND);
+	pending &= GENMASK(group->last, group->first);
+	if (!pending)
+		return IRQ_NONE;
+
+	for_each_set_bit(line, &pending, N32H7XX_EXTI_LINES) {
+		int owner = READ_ONCE(pctl->exti_owner[line]);
+		int ret;
+
+		if (owner < 0 || owner >= pctl->nbanks) {
+			n32h7xx_exti_clear_pending(pctl->exti, line);
+			dev_warn_ratelimited(pctl->dev,
+					     "unowned GPIO EXTI line %u\n", line);
+			continue;
+		}
+
+		ret = generic_handle_domain_irq(pctl->banks[owner].chip.irq.domain,
+						line);
+		if (ret < 0) {
+			n32h7xx_exti_clear_pending(pctl->exti, line);
+			dev_warn_ratelimited(pctl->dev,
+					     "no IRQ for GPIO%c%u EXTI line %u\n",
+					     'A' + owner, line, line);
+		}
+	}
+
+	return IRQ_HANDLED;
+}
+
+static int n32h7xx_request_exti_irqs(struct platform_device *pdev)
+{
+	static const unsigned int first_lines[N32H7XX_EXTI_NR_IRQS] = {
+		0, 1, 2, 3, 4, 5, 10,
+	};
+	static const unsigned int last_lines[N32H7XX_EXTI_NR_IRQS] = {
+		0, 1, 2, 3, 4, 9, 15,
+	};
+	struct n32h7xx_pinctrl *pctl = platform_get_drvdata(pdev);
+	struct device *dev = &pdev->dev;
+	unsigned int i;
+	int count;
+
+	count = platform_irq_count(pdev);
+	if (count < 0)
+		return count;
+	if (count != N32H7XX_EXTI_NR_IRQS)
+		return dev_err_probe(dev, -EINVAL,
+				     "expected %u EXTI IRQs, got %d\n",
+				     N32H7XX_EXTI_NR_IRQS, count);
+
+	for (i = 0; i < N32H7XX_EXTI_NR_IRQS; i++) {
+		struct n32h7xx_irq_group *group = &pctl->irq_groups[i];
+		int irq;
+		int ret;
+
+		irq = platform_get_irq(pdev, i);
+		if (irq < 0)
+			return irq;
+
+		group->pctl = pctl;
+		group->first = first_lines[i];
+		group->last = last_lines[i];
+		ret = devm_request_irq(dev, irq, n32h7xx_gpio_irq_handler,
+				       0, "n32h7xx-gpio", group);
+		if (ret)
+			return dev_err_probe(dev, ret,
+					     "cannot request EXTI IRQ %u\n", irq);
+	}
+
+	return 0;
+}
+
+static const struct irq_chip n32h7xx_gpio_irq_chip = {
+	.name			= "N32H7xx-GPIO",
+	.irq_ack		= n32h7xx_gpio_irq_ack,
+	.irq_mask		= n32h7xx_gpio_irq_mask,
+	.irq_unmask		= n32h7xx_gpio_irq_unmask,
+	.irq_set_type		= n32h7xx_gpio_irq_set_type,
+	.irq_request_resources	= n32h7xx_gpio_irq_request_resources,
+	.irq_release_resources	= n32h7xx_gpio_irq_release_resources,
+	.flags			= IRQCHIP_IMMUTABLE,
+};
+
 static const struct gpio_chip n32h7xx_gpio_template = {
 	.request		= gpiochip_generic_request,
 	.free			= gpiochip_generic_free,
@@ -944,8 +1275,13 @@ static int n32h7xx_build_functions(struct n32h7xx_pinctrl *pctl)
 					     name);
 	}
 
-	ret = pinmux_generic_add_function(pctl->pctl, "gpio", all,
-					  N32H7XX_NPINS, NULL);
+	{
+		const struct pinfunction gpio_func =
+			PINCTRL_GPIO_PINFUNCTION("gpio", all, N32H7XX_NPINS);
+
+		ret = pinmux_generic_add_pinfunction(pctl->pctl,
+						     &gpio_func, NULL);
+	}
 	if (ret < 0)
 		return ret;
 
@@ -988,6 +1324,7 @@ static int n32h7xx_pinctrl_add_bank(struct n32h7xx_pinctrl *pctl,
 {
 	struct n32h7xx_gpio_bank *bank = &pctl->banks[index];
 	struct device *dev = pctl->dev;
+	struct gpio_irq_chip *girq;
 	const char **names;
 	unsigned int port = index;
 	u32 reg;
@@ -1010,6 +1347,7 @@ static int n32h7xx_pinctrl_add_bank(struct n32h7xx_pinctrl *pctl,
 		names[j] = n32h7xx_pins[port * N32H7XX_PINS_PER_PORT + j].name;
 
 	bank->base = pctl->base + port * N32H7XX_GPIO_PORT_STRIDE;
+	bank->port = port;
 	spin_lock_init(&bank->lock);
 
 	bank->chip = n32h7xx_gpio_template;
@@ -1023,7 +1361,13 @@ static int n32h7xx_pinctrl_add_bank(struct n32h7xx_pinctrl *pctl,
 	bank->chip.ngpio = N32H7XX_PINS_PER_PORT;
 	bank->chip.names = names;
 
-	ret = gpiochip_add_data(&bank->chip, bank);
+	girq = &bank->chip.irq;
+	girq->fwnode = of_fwnode_handle(np);
+	girq->handler = handle_edge_irq;
+	girq->default_type = IRQ_TYPE_NONE;
+	gpio_irq_chip_set_chip(girq, &n32h7xx_gpio_irq_chip);
+
+	ret = devm_gpiochip_add_data(dev, &bank->chip, bank);
 	if (ret)
 		return dev_err_probe(dev, ret, "cannot add GPIO%c\n",
 				     'A' + port);
@@ -1088,9 +1432,24 @@ static int n32h7xx_pinctrl_probe(struct platform_device *pdev)
 	if (IS_ERR(pctl->base))
 		return PTR_ERR(pctl->base);
 
-	pctl->afio = devm_ioremap(dev, N32H7XX_AFIO_BASE, 0x400);
-	if (!pctl->afio)
-		return -ENOMEM;
+	pctl->afio = devm_platform_ioremap_resource_byname(pdev, "afio");
+	if (IS_ERR(pctl->afio))
+		return PTR_ERR(pctl->afio);
+
+	pctl->exti = devm_platform_ioremap_resource_byname(pdev, "exti");
+	if (IS_ERR(pctl->exti))
+		return PTR_ERR(pctl->exti);
+	spin_lock_init(&pctl->irq_lock);
+	/* GPIO EXTI lines share banks; start them masked and without stale edges. */
+	writel(readl(pctl->exti + N32H7XX_EXTI_RT_CFG) & ~0xffff,
+	       pctl->exti + N32H7XX_EXTI_RT_CFG);
+	writel(readl(pctl->exti + N32H7XX_EXTI_FT_CFG) & ~0xffff,
+	       pctl->exti + N32H7XX_EXTI_FT_CFG);
+	writel(readl(pctl->exti + N32H7XX_EXTI_M7IMASK) & ~0xffff,
+	       pctl->exti + N32H7XX_EXTI_M7IMASK);
+	writel(0xffff, pctl->exti + N32H7XX_EXTI_M7PEND);
+	for (i = 0; i < N32H7XX_EXTI_LINES; i++)
+		pctl->exti_owner[i] = -1;
 
 	descs = devm_kcalloc(dev, N32H7XX_NPINS, sizeof(*descs), GFP_KERNEL);
 	pctl->group_pins = devm_kcalloc(dev, N32H7XX_NPINS,
@@ -1136,6 +1495,10 @@ static int n32h7xx_pinctrl_probe(struct platform_device *pdev)
 		return ret;
 
 	ret = n32h7xx_pinctrl_add_banks(pctl);
+	if (ret)
+		return ret;
+
+	ret = n32h7xx_request_exti_irqs(pdev);
 	if (ret)
 		return ret;
 

@@ -1,19 +1,51 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* N32H7xx console, timekeeping, USB and audio clocks. */
 #include <linux/bitops.h>
+#include <linux/bitfield.h>
 #include <linux/clk-provider.h>
 #include <linux/delay.h>
 #include <linux/io.h>
+#include <linux/iopoll.h>
 #include <linux/of_address.h>
 #include <linux/slab.h>
 #include <linux/reset-controller.h>
 #include <linux/spinlock.h>
+
+#define N32H7XX_RCC_PLL2CTRL1 0x10
+#define N32H7XX_RCC_PLL2CTRL2 0x14
+#define N32H7XX_RCC_PLL3CTRL1 0x20
+#define N32H7XX_RCC_SRCCTRL1  0x30
+#define N32H7XX_RCC_PLL2DIV   0x38
+#define N32H7XX_RCC_AXIDIV1   0x138
+#define N32H7XX_RCC_AXISEL1   0x13c
 
 #define N32H7XX_APB1DIV1 0x74
 #define N32H7XX_APB1EN3  0x88
 #define N32H7XX_APB1EN1 0x80
 #define N32H7XX_APB1RST1 0x94
 #define N32H7XX_NUM_CLOCKS 15
+
+#define N32H7XX_PLL_SRC_MASK		GENMASK(29, 28)
+#define N32H7XX_PLL_SRC_HSE		GENMASK(29, 28)
+#define N32H7XX_PLL_LOCK		BIT(20)
+#define N32H7XX_PLL_LDO		BIT(19)
+#define N32H7XX_PLL_ENABLE		BIT(18)
+#define N32H7XX_PLL_RESET		BIT(17)
+#define N32H7XX_PLL_POWER_DOWN		BIT(16)
+#define N32H7XX_PLL_BWAJ		GENMASK(11, 0)
+#define N32H7XX_PLL2_A_DIV		GENMASK(5, 0)
+#define N32H7XX_PLL2_C_DIV		GENMASK(21, 16)
+#define N32H7XX_HSE_READY		BIT(3)
+#define N32H7XX_HSE_ENABLE		BIT(2)
+
+#define N32H7XX_PLL2_500M_CLKF		(20U * 16384)
+#define N32H7XX_PLL2_A_DIV5		5U
+#define N32H7XX_PLL2_C_DIV20		20U
+
+#define N32H7XX_AXIDIV1_LCDCAXIDIV	GENMASK(15, 12)
+#define N32H7XX_AXISEL1_LCDCKERSEL	GENMASK(13, 12)
+#define N32H7XX_LCDCKERSEL_PLL2C	2U
+#define N32H7XX_LCD_PIXEL_RATE_HZ	25000000UL
 
 static DEFINE_SPINLOCK(n32h7xx_rcc_lock);
 
@@ -33,19 +65,106 @@ struct n32h7xx_periph_clk {
 
 #define to_periph_clk(hw) container_of(hw, struct n32h7xx_periph_clk, hw)
 
+static int n32h7xx_lcdc_pll2_init(void __iomem *base)
+{
+	u32 ctrl, reg;
+	int ret;
+
+	/* PLL2's divider values below assume the HMI board's 25 MHz HSE. */
+	if (!of_machine_is_compatible("nsing,n32h787-hmi"))
+		return -EOPNOTSUPP;
+
+	ctrl = readl(base + N32H7XX_RCC_PLL2CTRL1);
+	if (ctrl & N32H7XX_PLL_ENABLE) {
+		/* PLL2A is shared with SDMMC; never retune a running PLL. */
+		if ((ctrl & N32H7XX_PLL_SRC_MASK) != N32H7XX_PLL_SRC_HSE ||
+		    readl(base + N32H7XX_RCC_PLL2CTRL2) != N32H7XX_PLL2_500M_CLKF ||
+		    FIELD_GET(N32H7XX_PLL2_A_DIV,
+			      readl(base + N32H7XX_RCC_PLL2DIV)) !=
+			      N32H7XX_PLL2_A_DIV5)
+			return -EBUSY;
+		ret = readl_poll_timeout(base + N32H7XX_RCC_PLL2CTRL1, reg,
+					 reg & N32H7XX_PLL_LOCK, 10, 100000);
+		if (ret)
+			return ret;
+	} else {
+		reg = readl(base + N32H7XX_RCC_SRCCTRL1);
+		writel(reg | N32H7XX_HSE_ENABLE, base + N32H7XX_RCC_SRCCTRL1);
+		ret = readl_poll_timeout(base + N32H7XX_RCC_SRCCTRL1, reg,
+					 reg & N32H7XX_HSE_READY, 10, 100000);
+		if (ret)
+			return ret;
+
+		ctrl &= ~(N32H7XX_PLL_SRC_MASK | N32H7XX_PLL_BWAJ);
+		ctrl |= N32H7XX_PLL_SRC_HSE | N32H7XX_PLL_RESET |
+			N32H7XX_PLL_POWER_DOWN |
+			FIELD_PREP(N32H7XX_PLL_BWAJ, 9);
+		writel(ctrl, base + N32H7XX_RCC_PLL2CTRL1);
+		writel(N32H7XX_PLL2_500M_CLKF, base + N32H7XX_RCC_PLL2CTRL2);
+
+		/* The vendor sequence enables the shared PLL supply in PLL3CTRL1. */
+		reg = readl(base + N32H7XX_RCC_PLL3CTRL1);
+		writel(reg | N32H7XX_PLL_LDO, base + N32H7XX_RCC_PLL3CTRL1);
+		udelay(10);
+		ctrl &= ~N32H7XX_PLL_POWER_DOWN;
+		writel(ctrl, base + N32H7XX_RCC_PLL2CTRL1);
+		udelay(10);
+		ctrl &= ~N32H7XX_PLL_RESET;
+		writel(ctrl, base + N32H7XX_RCC_PLL2CTRL1);
+		ret = readl_poll_timeout(base + N32H7XX_RCC_PLL2CTRL1, reg,
+					 reg & N32H7XX_PLL_LOCK, 10, 100000);
+		if (ret) {
+			writel(ctrl | N32H7XX_PLL_RESET |
+			       N32H7XX_PLL_POWER_DOWN,
+			       base + N32H7XX_RCC_PLL2CTRL1);
+			return ret;
+		}
+		writel(ctrl | N32H7XX_PLL_ENABLE,
+		       base + N32H7XX_RCC_PLL2CTRL1);
+
+		reg = readl(base + N32H7XX_RCC_PLL2DIV);
+		reg = (reg & ~N32H7XX_PLL2_A_DIV) |
+			FIELD_PREP(N32H7XX_PLL2_A_DIV, N32H7XX_PLL2_A_DIV5);
+		writel(reg, base + N32H7XX_RCC_PLL2DIV);
+	}
+
+	/* PLL2C = 500 MHz / 20 = 25 MHz, inside the panel's 23-27 MHz range. */
+	reg = readl(base + N32H7XX_RCC_PLL2DIV);
+	reg = (reg & ~N32H7XX_PLL2_C_DIV) |
+		FIELD_PREP(N32H7XX_PLL2_C_DIV, N32H7XX_PLL2_C_DIV20);
+	writel(reg, base + N32H7XX_RCC_PLL2DIV);
+	if (FIELD_GET(N32H7XX_PLL2_C_DIV,
+		      readl(base + N32H7XX_RCC_PLL2DIV)) !=
+	    N32H7XX_PLL2_C_DIV20)
+		return -EIO;
+
+	return 0;
+}
+
 static int n32h7xx_periph_clk_enable(struct clk_hw *hw)
 {
 	struct n32h7xx_periph_clk *clk = to_periph_clk(hw);
 	void __iomem *reg = clk->base + clk->enable_reg;
 	unsigned long flags;
+	int ret;
+
+	if (clk->pixel_clock) {
+		ret = n32h7xx_lcdc_pll2_init(clk->base);
+		if (ret)
+			return ret;
+	}
 
 	spin_lock_irqsave(&n32h7xx_rcc_lock, flags);
 	if (clk->pixel_clock) {
-		/* LCDC pixel clock: AXI / 8, without retuning either PLL. */
-		writel(readl(clk->base + 0x13c) & ~GENMASK(13, 12),
-		       clk->base + 0x13c);
-		writel((readl(clk->base + 0x138) & ~GENMASK(15, 12)) |
-		       (4 << 12), clk->base + 0x138);
+		/* Keep AXI/8 as the fallback, then select the 25 MHz PLL2C path. */
+		writel((readl(clk->base + N32H7XX_RCC_AXIDIV1) &
+			~N32H7XX_AXIDIV1_LCDCAXIDIV) | (4 << 12),
+		       clk->base + N32H7XX_RCC_AXIDIV1);
+		writel((readl(clk->base + N32H7XX_RCC_AXISEL1) &
+			~N32H7XX_AXISEL1_LCDCKERSEL) |
+			FIELD_PREP(N32H7XX_AXISEL1_LCDCKERSEL,
+				   N32H7XX_LCDCKERSEL_PLL2C),
+		       clk->base + N32H7XX_RCC_AXISEL1);
 		spin_unlock_irqrestore(&n32h7xx_rcc_lock, flags);
 		return 0;
 	}
@@ -99,7 +218,7 @@ static unsigned long n32h7xx_periph_clk_recalc_rate(struct clk_hw *hw,
 	u32 div;
 
 	if (clk->pixel_clock)
-		return parent_rate / 8;
+		return N32H7XX_LCD_PIXEL_RATE_HZ;
 
 	if (clk->bus_clock)
 		return parent_rate;

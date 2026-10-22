@@ -28,16 +28,6 @@
 #include <asm/cacheflush.h>
 #include <asm/v7m.h>
 
-#define N32H7XX_RCC_BASE		0x58030000
-#define N32H7XX_MMU_BASE		0x51050000
-#define N32H7XX_RCC_CFG2		0x160
-#define N32H7XX_RCC_CFG4		0x168
-#define N32H7XX_RCC_CFG2_M7MMU		GENMASK(23, 22)
-#define N32H7XX_RCC_CFG4_APB6CLKEN	BIT(19)
-#define N32H7XX_MMU_LCDME		0x160
-#define N32H7XX_MMU_GPUME		0x164
-#define N32H7XX_MMU_ME_EN		BIT(0)
-
 #define N32H7XX_PWR_BASE		0x58031000
 #define N32H7XX_PWR_SYSCTRL3		0x4c
 #define N32H7XX_PWR_IPMEMCTRL		0x58
@@ -48,6 +38,9 @@
 #define N32H7XX_PWR_IPMEMCTRL_GPU	BIT(0)
 #define N32H7XX_PWR_IPMEMCTRL_DVP	BIT(4)
 #define N32H7XX_PWR_IPMEMCTRL_GRAPHICS	GENMASK(4, 0)
+
+#define N32H7XX_AXI_LCDC_RQOS		0x51045100
+#define N32H7XX_AXI_LCDC_RQOS_HIGH	0xf
 
 #define N32H7XX_PWR_GRC_PWREN		BIT(0)
 #define N32H7XX_PWR_GRC_FUCEN		BIT(4)
@@ -61,6 +54,7 @@ static DEFINE_MUTEX(n32h7xx_graphics_lock);
 static void __iomem *n32h7xx_graphics_pwr;
 static void __iomem *n32h7xx_graphics_rcc;
 static void __iomem *n32h7xx_graphics_mmu;
+static void __iomem *n32h7xx_graphics_axi_lcdc_rqos;
 static unsigned int n32h7xx_graphics_users;
 static unsigned int n32h7xx_graphics_module_users[N32H7XX_GRAPHICS_MODULE_COUNT];
 
@@ -164,6 +158,22 @@ static int n32h7xx_graphics_domain_disable(void)
 	return readl_poll_timeout(n32h7xx_graphics_pwr + N32H7XX_PWR_SYSCTRL3,
 				  val, !(val & N32H7XX_PWR_GRC_PWRRDY), 10,
 				  N32H7XX_GRAPHICS_TIMEOUT_US);
+}
+
+static void n32h7xx_graphics_set_lcdc_qos(struct device *dev)
+{
+	if (!n32h7xx_graphics_axi_lcdc_rqos) {
+		n32h7xx_graphics_axi_lcdc_rqos =
+			ioremap(N32H7XX_AXI_LCDC_RQOS, sizeof(u32));
+		if (!n32h7xx_graphics_axi_lcdc_rqos) {
+			dev_warn(dev, "cannot map LCDC read QoS register\n");
+			return;
+		}
+	}
+
+	/* Keep LCDC scanout reads ahead of GPU writes to SDRAM. */
+	writel(N32H7XX_AXI_LCDC_RQOS_HIGH,
+	       n32h7xx_graphics_axi_lcdc_rqos);
 }
 
 static bool n32h7xx_graphics_domain_last_module(u32 gate)
@@ -278,6 +288,8 @@ int n32h7xx_graphics_acquire(struct device *dev,
 		writel(readl(n32h7xx_graphics_mmu + offset) | N32H7XX_MMU_ME_EN,
 		       n32h7xx_graphics_mmu + offset);
 	}
+	if (module == N32H7XX_GRAPHICS_LCDC)
+		n32h7xx_graphics_set_lcdc_qos(dev);
 
 	n32h7xx_graphics_module_users[module]++;
 	n32h7xx_graphics_users++;
@@ -297,8 +309,9 @@ EXPORT_SYMBOL_GPL(n32h7xx_graphics_acquire);
  * them for the life of the system: GEM mappings can survive driver unbind.
  *
  * An MPU region has to be naturally aligned to its size, so a pool that is
- * only aligned to part of its size needs more than one region.  The 4 MiB
- * shared pool at 0xC1A00000 is 2 MiB aligned: two 2 MiB regions cover it.
+ * only aligned to part of its size needs more than one region.  The 3 MiB
+ * shared pool at 0xC1A00000 is 2 MiB aligned: 2 MiB plus 1 MiB regions
+ * cover it.
  * Splitting instead of moving the pool keeps the optional capture pool at
  * the bottom of the reserved band, where disabling it extends main RAM
  * contiguously rather than leaving an island.
@@ -355,7 +368,8 @@ int n32h7xx_graphics_dma_prepare(struct device *dev)
 		pool = NULL;
 	of_node_put(node);
 	if (!pool || pool->size < PAGE_SIZE || pool->size > SZ_32M ||
-	    !is_power_of_2(pool->size) || !IS_ALIGNED(pool->base, PAGE_SIZE))
+	    !IS_ALIGNED(pool->size, PAGE_SIZE) ||
+	    !IS_ALIGNED(pool->base, PAGE_SIZE))
 		return dev_err_probe(dev, -EINVAL, "invalid graphics DMA pool geometry\n");
 
 	chunks = n32h7xx_graphics_mpu_chunks(pool, chunk_addr, chunk_size,

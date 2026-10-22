@@ -15,17 +15,6 @@
 #include <linux/soc/nsing/n32h7xx-graphics.h>
 #include <linux/soc/nsing/n32h7xx-jpeg.h>
 
-#define N32H7XX_RCC_BASE		0x58030000
-#define N32H7XX_MMU_BASE		0x51050000
-
-#define N32H7XX_RCC_CFG2		0x160
-#define N32H7XX_RCC_CFG4		0x168
-#define N32H7XX_RCC_CFG2_M7MMU		GENMASK(23, 22)
-#define N32H7XX_RCC_CFG4_APB6CLKEN	BIT(19)
-
-#define N32H7XX_MMU_JPEGME		0x158
-#define N32H7XX_MMU_ME_EN		BIT(0)
-
 int n32h7xx_jpeg_soc_init(struct device *dev)
 {
 	void __iomem *rcc;

@@ -41,6 +41,12 @@ properties:
     maxItems: 1
   memory-region:
     maxItems: 1
+  nsing,flip-horizontal:
+    description: Mirror each scanline from right to left.
+    type: boolean
+  nsing,flip-vertical:
+    description: Scan framebuffer rows from bottom to top.
+    type: boolean
   port:
     $ref: /schemas/graph.yaml#/properties/port
 

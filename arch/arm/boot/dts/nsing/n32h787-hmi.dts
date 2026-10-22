@@ -19,6 +19,7 @@
 /memreserve/ 0xc1e00000 0x00010000;
 
 #include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/interrupt-controller/irq.h>
 #include <dt-bindings/media/video-interfaces.h>
 #include "n32h7xx.dtsi"
 
@@ -43,6 +44,7 @@
 		serial0 = &usart1;
 		usb0 = &usb1;
 		usb1 = &usb2;
+		i2c1 = &i2c1;
 		i2c4 = &i2c4;
 	};
 
@@ -63,17 +65,17 @@
 		power-supply = <&lcd_power>;
 		enable-gpios = <&gpiob 10 GPIO_ACTIVE_HIGH>;
 		backlight = <&lcd_backlight>;
-		/* Same AXI / 8 and porch values as the 800x480 GPU example. */
+		/* NTW430T40X005A / ST7262: 25 MHz, 816 x 496 total. */
 		panel-timing {
-			clock-frequency = <37500000>;
+			clock-frequency = <25000000>;
 			hactive = <800>;
 			vactive = <480>;
-			hsync-len = <34>;
-			hback-porch = <46>;
-			hfront-porch = <210>;
-			vsync-len = <10>;
-			vback-porch = <23>;
-			vfront-porch = <22>;
+			hsync-len = <4>;
+			hback-porch = <8>;
+			hfront-porch = <4>;
+			vsync-len = <4>;
+			vback-porch = <8>;
+			vfront-porch = <4>;
 			hsync-active = <0>;
 			vsync-active = <0>;
 			de-active = <0>;
@@ -126,6 +128,40 @@
 		compatible = "fixed-clock";
 		#clock-cells = <0>;
 		clock-frequency = <24000000>;
+	};
+
+	/*
+	 * The touch controller shares the HMI panel power/reset path and uses
+	 * PD4/PD5 for I2C1.  There is no hardware I2C1 controller driver yet,
+	 * so expose the bus as i2c-gpio while preserving the hardware bus
+	 * number through the alias above.
+	 */
+	i2c1: i2c1 {
+		compatible = "i2c-gpio";
+		#address-cells = <1>;
+		#size-cells = <0>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&i2c1_pins>;
+		scl-gpios = <&gpiod 4 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		sda-gpios = <&gpiod 5 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		i2c-gpio,delay-us = <5>;
+
+		touchscreen@5d {
+			compatible = "goodix,gt911";
+			reg = <0x5d>;
+			interrupt-parent = <&gpiod>;
+			interrupts = <11 IRQ_TYPE_EDGE_FALLING>;
+			pinctrl-names = "default";
+			pinctrl-0 = <&touch_control_pins>;
+			reset-gpios = <&gpiod 6 GPIO_ACTIVE_HIGH>;
+			AVDD28-supply = <&lcd_power>;
+			VDDIO-supply = <&lcd_power>;
+			touchscreen-size-x = <800>;
+			touchscreen-size-y = <480>;
+			touchscreen-inverted-x;
+			touchscreen-inverted-y;
+			status = "okay";
+		};
 	};
 
 	/*
@@ -283,13 +319,16 @@
 
 		/*
 		 * Shared allocation bitmap for LCDC scanout and GPU GEM buffers.
+		 * The panel contract is 800x480 RGB565, so three 750 KiB frames
+		 * (fbdev plus two application buffers) fit with room for the GPU's
+		 * 16 KiB command stream and bookkeeping.
 		 * Kept above the capture pool so the optional pool can be given
 		 * back without leaving a hole; the no-display variant removes
 		 * this pool entirely instead of moving it.
 		 */
 		graphics_dma_pool: dma-pool@c1a00000 {
 			compatible = "shared-dma-pool";
-			reg = <0xc1a00000 0x00400000>;
+			reg = <0xc1a00000 0x00300000>;
 			no-map;
 		};
 
@@ -385,6 +424,22 @@
 		pins = "PD12", "PD13";
 		bias-pull-up;
 		drive-strength = <3>;
+	};
+
+	i2c1_pins: i2c1-pins {
+		pins = "PD4", "PD5";
+		function = "gpio";
+		bias-pull-up;
+		drive-strength = <3>;
+		slew-rate = <0>;
+	};
+
+	touch_control_pins: touch-control-pins {
+		pins = "PD6", "PD11";
+		function = "gpio";
+		bias-pull-up;
+		drive-strength = <1>;
+		slew-rate = <0>;
 	};
 
 	audio_pins: audio-pins {
@@ -732,6 +787,8 @@
 	pinctrl-names = "default";
 	pinctrl-0 = <&lcdc_pins &lcd_control_pins>;
 	memory-region = <&graphics_dma_pool>;
+	nsing,flip-horizontal;
+	nsing,flip-vertical;
 	status = "okay";
 
 	port {

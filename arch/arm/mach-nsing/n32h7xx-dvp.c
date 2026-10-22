@@ -25,9 +25,6 @@
 #include <linux/soc/nsing/n32h7xx-graphics.h>
 
 /* AHB5/AHB6 register blocks touched here. */
-#define N32H7XX_RCC_BASE		0x58030000
-#define N32H7XX_MMU_BASE		0x51050000
-
 #define N32H7XX_DVP1_BASE		0x50048000
 #define N32H7XX_DVP2_BASE		0x50049000
 
@@ -36,9 +33,6 @@
 #define N32H7XX_RCC_AXISEL1		0x13c
 #define N32H7XX_RCC_AXIEN2		0x144
 #define N32H7XX_RCC_AXIRST2		0x154
-#define N32H7XX_RCC_CFG2		0x160
-#define N32H7XX_RCC_CFG4		0x168
-
 /* AXIDIV1.DVPMAXIDIV[3:0] selects the DVP module clock divide (bit 11 is not
  * part of the encoding: DIV16 is 0x7 << 8).
  */
@@ -54,14 +48,6 @@
 #define N32H7XX_RCC_AXIEN2_DVP1		(BIT(19) | BIT(17) | BIT(15) | BIT(13))
 #define N32H7XX_RCC_AXIRST2_DVP2	BIT(8)
 #define N32H7XX_RCC_AXIRST2_DVP1	BIT(16)
-#define N32H7XX_RCC_CFG2_M7MMU		(BIT(23) | BIT(22))
-#define N32H7XX_RCC_CFG4_APB6CLKEN	BIT(19)
-
-/* MMU: per-master module-memory enable, bit 0 = EN. */
-#define N32H7XX_MMU_DVP1ME		0x144
-#define N32H7XX_MMU_DVP2ME		0x148
-#define N32H7XX_MMU_ME_EN		BIT(0)
-
 #define N32H7XX_DVP_RESET_SETTLE_US	10
 
 struct n32h7xx_dvp_hw {

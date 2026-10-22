@@ -12,6 +12,7 @@ config PINCTRL_N32H7XX
 	select GENERIC_PINCONF
 	select GENERIC_PINCTRL_GROUPS
 	select GENERIC_PINMUX_FUNCTIONS
+	select GPIOLIB_IRQCHIP
 	help
 	  Support for the pin controller and the GPIO ports built into the
 	  NSING N32H7xx SoCs.  One register block per port holds the mode,

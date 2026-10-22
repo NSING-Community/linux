@@ -2,6 +2,7 @@
 /* NSING N32H7xx parallel RGB LCD controller. */
 
 #include <linux/clk.h>
+#include <linux/fb.h>
 #include <linux/interrupt.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
@@ -50,6 +51,7 @@
 #define LCDC_CFBLNUM		0x13c
 
 #define LCDC_ENABLE		BIT(0)
+#define LCDC_HORIZONTAL_MIRROR	BIT(8)
 #define LCDC_DE_LOW		BIT(29)
 #define LCDC_VSYNC_HIGH		BIT(30)
 #define LCDC_HSYNC_HIGH		BIT(31)
@@ -61,13 +63,28 @@
 #define LCDC_IRQ_RELOAD		BIT(3)
 #define LCDC_IRQ_MASK		GENMASK(3, 0)
 
+/* The HMI panel and scanout contract are fixed at 800x480 RGB565. */
+#define N32H7XX_LCDC_MAX_WIDTH	800
+#define N32H7XX_LCDC_MAX_HEIGHT	480
+
 struct n32h7xx_lcdc {
 	struct drm_device drm;
 	struct drm_simple_display_pipe pipe;
 	void __iomem *regs;
 	struct clk *pixel;
-	struct drm_pending_vblank_event *event;
+	bool flip_horizontal;
+	bool flip_vertical;
+	bool enabled;
 };
+
+static void n32h7xx_lcdc_arm_event(struct n32h7xx_lcdc *lcdc,
+				   struct drm_pending_vblank_event *event)
+{
+	if (drm_crtc_vblank_get(&lcdc->pipe.crtc) == 0)
+		drm_crtc_arm_vblank_event(&lcdc->pipe.crtc, event);
+	else
+		drm_crtc_send_vblank_event(&lcdc->pipe.crtc, event);
+}
 
 static struct n32h7xx_lcdc *pipe_to_lcdc(struct drm_simple_display_pipe *pipe)
 {
@@ -79,13 +96,22 @@ static void n32h7xx_lcdc_set_fb(struct n32h7xx_lcdc *lcdc)
 	struct drm_plane_state *state = lcdc->pipe.plane.state;
 	struct drm_framebuffer *fb = state->fb;
 	dma_addr_t addr = drm_fb_dma_get_gem_addr(fb, state, 0);
-	u32 line = fb->width * fb->format->cpp[0];
+	u32 bytes_per_pixel = fb->format->cpp[0];
+	u32 line = fb->width * bytes_per_pixel;
+	u32 pitch = fb->pitches[0];
+
+	if (lcdc->flip_vertical) {
+		addr += (fb->height - 1) * pitch;
+		pitch = -pitch;
+	}
+	if (lcdc->flip_horizontal)
+		addr += line - 1;
 
 	writel(fb->format->format == DRM_FORMAT_RGB565 ? 4 : 0,
 	       lcdc->regs + LCDC_PFCTRL);
 	writel(addr, lcdc->regs + LCDC_CFBADDR);
 	/* The bus fetch length includes the controller's seven-byte bias. */
-	writel((fb->pitches[0] << 16) | (line + 7), lcdc->regs + LCDC_CFBLEN);
+	writel((pitch << 16) | (line + 7), lcdc->regs + LCDC_CFBLEN);
 	writel(fb->height, lcdc->regs + LCDC_CFBLNUM);
 }
 
@@ -97,8 +123,9 @@ n32h7xx_lcdc_mode_valid(struct drm_simple_display_pipe *pipe,
 
 	if (mode->flags & (DRM_MODE_FLAG_INTERLACE | DRM_MODE_FLAG_DBLSCAN))
 		return MODE_NO_INTERLACE;
-	if (mode->hdisplay > 2048 || mode->htotal > 4096 ||
-	    mode->vdisplay > 2048 || mode->vtotal > 4096)
+	if (mode->hdisplay > N32H7XX_LCDC_MAX_WIDTH ||
+	    mode->vdisplay > N32H7XX_LCDC_MAX_HEIGHT ||
+	    mode->htotal > 4096 || mode->vtotal > 4096)
 		return MODE_BAD;
 	if (mode->clock != clk_get_rate(lcdc->pixel) / 1000)
 		return MODE_CLOCK_RANGE;
@@ -113,7 +140,8 @@ static int n32h7xx_lcdc_check(struct drm_simple_display_pipe *pipe,
 
 	if (!fb)
 		return 0;
-	if (state->src_x || state->src_y ||
+	if (fb->format->format != DRM_FORMAT_RGB565 ||
+	    state->src_x || state->src_y ||
 	    fb->width != crtc_state->mode.hdisplay ||
 	    fb->height != crtc_state->mode.vdisplay ||
 	    fb->pitches[0] > 0xffff || fb->pitches[0] & 3 ||
@@ -136,6 +164,7 @@ static void n32h7xx_lcdc_enable(struct drm_simple_display_pipe *pipe,
 	u32 hbp = m->htotal - m->hsync_start;
 	u32 vbp = m->vtotal - m->vsync_start;
 	u32 ctrl = LCDC_DE_LOW;
+	unsigned long flags;
 	int i;
 
 	if (m->flags & DRM_MODE_FLAG_PHSYNC)
@@ -163,15 +192,33 @@ static void n32h7xx_lcdc_enable(struct drm_simple_display_pipe *pipe,
 	/* Constant alpha, opaque layer: BF1 = CA, BF2 = 1 - CA. */
 	writel(0x405, lcdc->regs + LCDC_BFCTRL);
 	n32h7xx_lcdc_set_fb(lcdc);
-	writel(LCDC_ENABLE, lcdc->regs + LCDC_LCTRL(1));
-	writel(LCDC_RELOAD_NOW, lcdc->regs + LCDC_SRCTRL);
+
+	/*
+	 * Layer registers are shadowed.  Latch the configuration while the
+	 * layer is disabled, set LEN, then latch the layer enable as well.
+	 * This is the ordering used by the SoC vendor's RGB565 example.
+	 */
+	writel(LCDC_RELOAD_NOW, lcdc->regs + LCDC_LSRCTRL(1));
+	writel(LCDC_ENABLE | (lcdc->flip_horizontal ? LCDC_HORIZONTAL_MIRROR : 0),
+	       lcdc->regs + LCDC_LCTRL(1));
+	writel(LCDC_RELOAD_NOW, lcdc->regs + LCDC_LSRCTRL(1));
 	writel(vbp + m->vdisplay, lcdc->regs + LCDC_LINTPCTRL);
 	writel(LCDC_IRQ_MASK, lcdc->regs + LCDC_INTCLR);
 	writel(LCDC_IRQ_MASK, lcdc->regs + LCDC_INTEN);
 	writel(ctrl | LCDC_ENABLE, lcdc->regs + LCDC_GCTRL);
 	drm_crtc_vblank_on_config(&pipe->crtc, &vblank_config);
-	/* Initial plane update runs before enable; complete it on the first VB. */
-	writel(LCDC_RELOAD_VBLANK, lcdc->regs + LCDC_SRCTRL);
+	lcdc->enabled = true;
+	spin_lock_irqsave(&lcdc->drm.event_lock, flags);
+	if (crtc_state->event) {
+		n32h7xx_lcdc_arm_event(lcdc, crtc_state->event);
+		crtc_state->event = NULL;
+	}
+	spin_unlock_irqrestore(&lcdc->drm.event_lock, flags);
+	dev_dbg(lcdc->drm.dev,
+		"enabled 800x480: GCTRL=%#x LCTRL1=%#x PFCTRL=%#x\n",
+		readl(lcdc->regs + LCDC_GCTRL),
+		readl(lcdc->regs + LCDC_LCTRL(1)),
+		readl(lcdc->regs + LCDC_PFCTRL));
 }
 
 static void n32h7xx_lcdc_disable(struct drm_simple_display_pipe *pipe)
@@ -181,6 +228,7 @@ static void n32h7xx_lcdc_disable(struct drm_simple_display_pipe *pipe)
 	struct drm_crtc_state *state = pipe->crtc.state;
 	unsigned long flags;
 
+	lcdc->enabled = false;
 	writel(0, lcdc->regs + LCDC_INTEN);
 	writel(0, lcdc->regs + LCDC_GCTRL);
 	drm_crtc_vblank_off(&pipe->crtc);
@@ -193,10 +241,6 @@ static void n32h7xx_lcdc_disable(struct drm_simple_display_pipe *pipe)
 	if (state->event) {
 		drm_crtc_send_vblank_event(&pipe->crtc, state->event);
 		state->event = NULL;
-	}
-	if (lcdc->event) {
-		drm_crtc_send_vblank_event(&pipe->crtc, lcdc->event);
-		lcdc->event = NULL;
 	}
 	spin_unlock_irqrestore(&drm->event_lock, flags);
 }
@@ -211,15 +255,14 @@ static void n32h7xx_lcdc_update(struct drm_simple_display_pipe *pipe,
 	if (!pipe->plane.state->fb)
 		return;
 
-	/* Publish the event and reload together; IRQ completes after latching. */
+	/* The layer is shadowed; latch the new scanout address at vertical blank. */
 	spin_lock_irqsave(&lcdc->drm.event_lock, flags);
-	writel(LCDC_IRQ_RELOAD, lcdc->regs + LCDC_INTCLR);
 	n32h7xx_lcdc_set_fb(lcdc);
-	if (state->event) {
-		lcdc->event = state->event;
+	writel(LCDC_RELOAD_VBLANK, lcdc->regs + LCDC_LSRCTRL(1));
+	if (lcdc->enabled && state->event) {
+		n32h7xx_lcdc_arm_event(lcdc, state->event);
 		state->event = NULL;
 	}
-	writel(LCDC_RELOAD_VBLANK, lcdc->regs + LCDC_SRCTRL);
 	spin_unlock_irqrestore(&lcdc->drm.event_lock, flags);
 }
 
@@ -238,7 +281,6 @@ static irqreturn_t n32h7xx_lcdc_irq(int irq, void *data)
 	struct n32h7xx_lcdc *lcdc = data;
 	u32 status = readl(lcdc->regs + LCDC_INTSTS) &
 		     readl(lcdc->regs + LCDC_INTEN);
-	unsigned long flags;
 
 	if (!status)
 		return IRQ_NONE;
@@ -246,18 +288,8 @@ static irqreturn_t n32h7xx_lcdc_irq(int irq, void *data)
 		writel(LCDC_IRQ_LINE, lcdc->regs + LCDC_INTCLR);
 		drm_crtc_handle_vblank(&lcdc->pipe.crtc);
 	}
-	/* Serialize reload acknowledgment with publication of the next flip. */
-	spin_lock_irqsave(&lcdc->drm.event_lock, flags);
-	status = readl(lcdc->regs + LCDC_INTSTS) &
-		 readl(lcdc->regs + LCDC_INTEN) & ~LCDC_IRQ_LINE;
-	writel(status, lcdc->regs + LCDC_INTCLR);
-	if (status & LCDC_IRQ_RELOAD) {
-		if (lcdc->event) {
-			drm_crtc_send_vblank_event(&lcdc->pipe.crtc, lcdc->event);
-			lcdc->event = NULL;
-		}
-	}
-	spin_unlock_irqrestore(&lcdc->drm.event_lock, flags);
+	if (status & ~LCDC_IRQ_LINE)
+		writel(status & ~LCDC_IRQ_LINE, lcdc->regs + LCDC_INTCLR);
 	if (status & (LCDC_IRQ_UNDERRUN | LCDC_IRQ_BUS_ERROR))
 		dev_warn_ratelimited(lcdc->drm.dev, "LCD fetch error: %#x\n", status);
 	return IRQ_HANDLED;
@@ -293,7 +325,7 @@ static const struct drm_driver n32h7xx_lcdc_driver = {
 
 static int n32h7xx_lcdc_probe(struct platform_device *pdev)
 {
-	static const u32 formats[] = { DRM_FORMAT_RGB565, DRM_FORMAT_XRGB8888 };
+	static const u32 formats[] = { DRM_FORMAT_RGB565 };
 	struct device *dev = &pdev->dev;
 	struct n32h7xx_lcdc *lcdc;
 	struct drm_device *drm;
@@ -307,6 +339,10 @@ static int n32h7xx_lcdc_probe(struct platform_device *pdev)
 	if (IS_ERR(lcdc))
 		return PTR_ERR(lcdc);
 	drm = &lcdc->drm;
+	lcdc->flip_horizontal = device_property_read_bool(dev,
+							 "nsing,flip-horizontal");
+	lcdc->flip_vertical = device_property_read_bool(dev,
+						       "nsing,flip-vertical");
 	bridge = devm_drm_of_get_bridge(dev, dev->of_node, 0, 0);
 	if (IS_ERR(bridge))
 		return dev_err_probe(dev, PTR_ERR(bridge), "cannot find LCD panel\n");
@@ -339,8 +375,8 @@ static int n32h7xx_lcdc_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 	drm->mode_config.funcs = &n32h7xx_lcdc_mode_funcs;
-	drm->mode_config.max_width = 2048;
-	drm->mode_config.max_height = 2048;
+	drm->mode_config.max_width = N32H7XX_LCDC_MAX_WIDTH;
+	drm->mode_config.max_height = N32H7XX_LCDC_MAX_HEIGHT;
 	ret = drm_simple_display_pipe_init(drm, &lcdc->pipe,
 					   &n32h7xx_lcdc_pipe_funcs, formats,
 					   ARRAY_SIZE(formats), NULL, NULL);
@@ -383,8 +419,18 @@ static int n32h7xx_lcdc_probe(struct platform_device *pdev)
 	if (drm->fb_helper) {
 		ret = drm_fb_helper_restore_fbdev_mode_unlocked(drm->fb_helper,
 								false);
-		if (ret)
+		if (ret) {
 			drm_warn(drm, "cannot apply the initial mode: %d\n", ret);
+		} else if (drm->fb_helper->info) {
+			/*
+			 * register_framebuffer() starts fbdev with POWERDOWN whenever
+			 * fb_blank is present.  There is no fbcon on this board, so do
+			 * the normal first unblank that a console would otherwise do.
+			 */
+			ret = fb_blank(drm->fb_helper->info, FB_BLANK_UNBLANK);
+			if (ret)
+				drm_warn(drm, "cannot unblank the initial mode: %d\n", ret);
+		}
 	}
 #endif
 	return 0;

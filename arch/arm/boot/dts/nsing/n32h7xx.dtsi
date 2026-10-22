@@ -193,14 +193,22 @@
 		 */
 		pinctrl: pinctrl@58032800 {
 			compatible = "nsing,n32h7xx-pinctrl";
-			reg = <0x58032800 0x2c00>;
+			reg = <0x58032800 0x2c00>,
+			      <0x58032400 0x400>,
+			      <0x58000000 0x400>;
+			reg-names = "gpio", "afio", "exti";
 			#address-cells = <1>;
 			#size-cells = <1>;
+			interrupts = <5>, <6>, <7>, <8>, <9>, <10>, <11>;
+			interrupt-names = "exti0", "exti1", "exti2", "exti3",
+					  "exti4", "exti5-9", "exti10-15";
 
 			gpioa: gpio@58032800 {
 				reg = <0x58032800 0x400>;
 				gpio-controller;
 				#gpio-cells = <2>;
+				interrupt-controller;
+				#interrupt-cells = <2>;
 				gpio-ranges = <&pinctrl 0 0 16>;
 			};
 
@@ -208,6 +216,8 @@
 				reg = <0x58032c00 0x400>;
 				gpio-controller;
 				#gpio-cells = <2>;
+				interrupt-controller;
+				#interrupt-cells = <2>;
 				gpio-ranges = <&pinctrl 0 16 16>;
 			};
 
@@ -215,6 +225,8 @@
 				reg = <0x58033000 0x400>;
 				gpio-controller;
 				#gpio-cells = <2>;
+				interrupt-controller;
+				#interrupt-cells = <2>;
 				gpio-ranges = <&pinctrl 0 32 16>;
 			};
 
@@ -222,6 +234,8 @@
 				reg = <0x58033400 0x400>;
 				gpio-controller;
 				#gpio-cells = <2>;
+				interrupt-controller;
+				#interrupt-cells = <2>;
 				gpio-ranges = <&pinctrl 0 48 16>;
 			};
 
@@ -229,6 +243,8 @@
 				reg = <0x58033800 0x400>;
 				gpio-controller;
 				#gpio-cells = <2>;
+				interrupt-controller;
+				#interrupt-cells = <2>;
 				gpio-ranges = <&pinctrl 0 64 16>;
 			};
 
@@ -236,6 +252,8 @@
 				reg = <0x58033c00 0x400>;
 				gpio-controller;
 				#gpio-cells = <2>;
+				interrupt-controller;
+				#interrupt-cells = <2>;
 				gpio-ranges = <&pinctrl 0 80 16>;
 			};
 
@@ -243,6 +261,8 @@
 				reg = <0x58034000 0x400>;
 				gpio-controller;
 				#gpio-cells = <2>;
+				interrupt-controller;
+				#interrupt-cells = <2>;
 				gpio-ranges = <&pinctrl 0 96 16>;
 			};
 
@@ -250,6 +270,8 @@
 				reg = <0x58034400 0x400>;
 				gpio-controller;
 				#gpio-cells = <2>;
+				interrupt-controller;
+				#interrupt-cells = <2>;
 				gpio-ranges = <&pinctrl 0 112 16>;
 			};
 
@@ -257,6 +279,8 @@
 				reg = <0x58034800 0x400>;
 				gpio-controller;
 				#gpio-cells = <2>;
+				interrupt-controller;
+				#interrupt-cells = <2>;
 				gpio-ranges = <&pinctrl 0 128 16>;
 			};
 
@@ -264,6 +288,8 @@
 				reg = <0x58034c00 0x400>;
 				gpio-controller;
 				#gpio-cells = <2>;
+				interrupt-controller;
+				#interrupt-cells = <2>;
 				gpio-ranges = <&pinctrl 0 144 16>;
 			};
 
@@ -271,6 +297,8 @@
 				reg = <0x58035000 0x400>;
 				gpio-controller;
 				#gpio-cells = <2>;
+				interrupt-controller;
+				#interrupt-cells = <2>;
 				gpio-ranges = <&pinctrl 0 160 16>;
 			};
 		};

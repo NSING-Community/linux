@@ -273,6 +273,8 @@ static const struct n32h7xx_format *n32h7xx_format_of(u32 fourcc)
 	return NULL;
 }
 
+struct n32h7xx_poly_batch_item;
+
 struct n32h7xx_gpu {
 	struct drm_device drm;
 	void __iomem *regs;
@@ -294,6 +296,8 @@ struct n32h7xx_gpu {
 	struct mutex batch_lock;
 	struct drm_n32h7xx_rect *batch_rects;
 	struct n32h7xx_batch_item *batch_items;
+	struct drm_n32h7xx_poly *batch_polys;
+	struct n32h7xx_poly_batch_item *batch_poly_items;
 };
 
 struct n32h7xx_fence {
@@ -378,6 +382,19 @@ struct n32h7xx_batch {
 	unsigned int count;
 };
 
+/* Validated polygon and the state its emitter needs outside the geometry. */
+struct n32h7xx_poly_batch_item {
+	struct n32h7xx_poly_geom geom;
+	u32 org;
+	u32 pitch_px;
+};
+
+struct n32h7xx_poly_batch {
+	const struct drm_n32h7xx_poly *polys;
+	struct n32h7xx_poly_batch_item *item;
+	unsigned int count;
+};
+
 /* One submitted 2D operation, independent of which engine executes it. */
 struct n32h7xx_job {
 	int (*validate)(struct drm_gem_object *obj, struct n32h7xx_job *job);
@@ -387,6 +404,7 @@ struct n32h7xx_job {
 	const struct drm_n32h7xx_poly *poly;
 	const struct drm_n32h7xx_curve *curve;
 	struct n32h7xx_batch *batch;
+	struct n32h7xx_poly_batch *poly_batch;
 	struct n32h7xx_poly_geom geom;
 	struct drm_n32h7xx_profile *profile;
 	u32 iterations;
@@ -992,6 +1010,31 @@ static int n32h7xx_gpu_validate_poly(struct drm_gem_object *obj,
 	return 0;
 }
 
+static int n32h7xx_gpu_validate_poly_batch(struct drm_gem_object *obj,
+					   struct n32h7xx_job *job)
+{
+	struct n32h7xx_poly_batch *batch = job->poly_batch;
+	unsigned int i;
+
+	for (i = 0; i < batch->count; i++) {
+		struct n32h7xx_poly_batch_item *item = &batch->item[i];
+		struct n32h7xx_job one = {
+			.poly = &batch->polys[i],
+		};
+		int ret;
+
+		if (one.poly->handle != job->draw->handle)
+			return -EINVAL;
+		ret = n32h7xx_gpu_validate_poly(obj, &one);
+		if (ret)
+			return ret;
+		item->geom = one.geom;
+		item->org = one.org;
+		item->pitch_px = one.pitch_px;
+	}
+	return 0;
+}
+
 static s64 n32h7xx_round_shift16(s64 v)
 {
 	return v >= 0 ? (v + 0x8000) >> 16 : -((-v + 0x8000) >> 16);
@@ -1159,8 +1202,8 @@ static int n32h7xx_gpu_validate_curve(struct drm_gem_object *obj,
 	return 0;
 }
 
-static void n32h7xx_gpu_emit_poly(struct n32h7xx_gpu *gpu,
-				  const struct n32h7xx_job *job, dma_addr_t addr)
+static unsigned int n32h7xx_gpu_emit_poly_body(const struct n32h7xx_job *job,
+					       dma_addr_t addr, u32 *s)
 {
 	const struct drm_n32h7xx_poly *args = job->poly;
 	const struct drm_n32h7xx_curve *curve = job->curve;
@@ -1169,7 +1212,6 @@ static void n32h7xx_gpu_emit_poly(struct n32h7xx_gpu *gpu,
 	u32 offset = curve ? curve->offset : args->offset;
 	u32 bez_aa = 0;
 	u32 lim_ctrl;
-	u32 *s = gpu->stream;
 	unsigned int n = 0, i;
 	u32 ctrl = 0;
 
@@ -1244,6 +1286,49 @@ static void n32h7xx_gpu_emit_poly(struct n32h7xx_gpu *gpu,
 	s[n++] = (geom->ymax << 16) | geom->xmax;
 	s[n++] = geom->ymin << 16;
 	s[n++] = ctrl;
+	return n;
+}
+
+/* The batch limit is chosen so full per-polygon state still fits one stream. */
+#define GPU_POLY_BODY_WORDS	58
+#define GPU_POLY_BATCH_MAX	DRM_N32H7XX_POLY_BATCH_MAX
+static_assert(GPU_POLY_BODY_WORDS * GPU_POLY_BATCH_MAX + 2 <= GPU_STREAM_WORDS);
+
+static void n32h7xx_gpu_emit_poly(struct n32h7xx_gpu *gpu,
+				  const struct n32h7xx_job *job, dma_addr_t addr)
+{
+	u32 *s = gpu->stream;
+	unsigned int n;
+
+	n = n32h7xx_gpu_emit_poly_body(job, addr, s);
+	s[n++] = GPU_OP_WAIT(GPU_WAIT_PIPE);
+	s[n++] = GPU_OP_END;
+}
+
+static void n32h7xx_gpu_emit_poly_batch(struct n32h7xx_gpu *gpu,
+					const struct n32h7xx_job *job,
+					dma_addr_t addr)
+{
+	const struct n32h7xx_poly_batch *batch = job->poly_batch;
+	u32 *s = gpu->stream;
+	unsigned int n = 0, i;
+
+	for (i = 0; i < batch->count; i++) {
+		const struct n32h7xx_poly_batch_item *item = &batch->item[i];
+		struct n32h7xx_job one = {
+			.poly = &batch->polys[i],
+			.geom = item->geom,
+			.org = item->org,
+			.pitch_px = item->pitch_px,
+		};
+
+		/* Validation and the compile-time worst-case check above keep
+		 * this from overrunning the coherent command buffer.
+		 */
+		if (n + GPU_POLY_BODY_WORDS + 2 > GPU_STREAM_WORDS)
+			break;
+		n += n32h7xx_gpu_emit_poly_body(&one, addr, s + n);
+	}
 	s[n++] = GPU_OP_WAIT(GPU_WAIT_PIPE);
 	s[n++] = GPU_OP_END;
 }
@@ -1493,6 +1578,39 @@ static int n32h7xx_gpu_poly(struct drm_device *drm, void *data,
 	};
 
 	return n32h7xx_gpu_exec(drm, file, poly->handle, &job);
+}
+
+static int n32h7xx_gpu_poly_batch(struct drm_device *drm, void *data,
+				  struct drm_file *file)
+{
+	struct drm_n32h7xx_poly_batch *args = data;
+	struct n32h7xx_gpu *gpu = container_of(drm, struct n32h7xx_gpu, drm);
+	struct n32h7xx_draw draw = { .handle = args->handle };
+	struct n32h7xx_poly_batch batch;
+	struct n32h7xx_job job = {
+		.validate = n32h7xx_gpu_validate_poly_batch,
+		.emit = n32h7xx_gpu_emit_poly_batch,
+		.draw = &draw,
+		.poly_batch = &batch,
+	};
+	int ret;
+
+	if (args->reserved || args->pad || !args->count || !args->polys ||
+	    args->count > DRM_N32H7XX_POLY_BATCH_MAX)
+		return -EINVAL;
+	if (mutex_lock_interruptible(&gpu->batch_lock))
+		return -ERESTARTSYS;
+	if (copy_from_user(gpu->batch_polys, u64_to_user_ptr(args->polys),
+			   array_size(args->count, sizeof(*gpu->batch_polys)))) {
+		mutex_unlock(&gpu->batch_lock);
+		return -EFAULT;
+	}
+	batch.polys = gpu->batch_polys;
+	batch.item = gpu->batch_poly_items;
+	batch.count = args->count;
+	ret = n32h7xx_gpu_exec(drm, file, draw.handle, &job);
+	mutex_unlock(&gpu->batch_lock);
+	return ret;
 }
 
 static int n32h7xx_gpu_curve(struct drm_device *drm, void *data,
@@ -1909,6 +2027,8 @@ static const struct drm_ioctl_desc n32h7xx_gpu_ioctls[] = {
 	DRM_IOCTL_DEF_DRV(N32H7XX_BLEND, n32h7xx_gpu_blend, DRM_RENDER_ALLOW),
 	DRM_IOCTL_DEF_DRV(N32H7XX_BLIT, n32h7xx_gpu_blit, DRM_RENDER_ALLOW),
 	DRM_IOCTL_DEF_DRV(N32H7XX_POLY, n32h7xx_gpu_poly, DRM_RENDER_ALLOW),
+	DRM_IOCTL_DEF_DRV(N32H7XX_POLY_BATCH, n32h7xx_gpu_poly_batch,
+			  DRM_RENDER_ALLOW),
 	DRM_IOCTL_DEF_DRV(N32H7XX_CURVE, n32h7xx_gpu_curve, DRM_RENDER_ALLOW),
 	DRM_IOCTL_DEF_DRV(N32H7XX_PROFILE, n32h7xx_gpu_profile,
 			  DRM_RENDER_ALLOW),
@@ -1955,7 +2075,13 @@ static int n32h7xx_gpu_probe(struct platform_device *pdev)
 					sizeof(*gpu->batch_rects), GFP_KERNEL);
 	gpu->batch_items = devm_kcalloc(dev, DRM_N32H7XX_BATCH_MAX,
 					sizeof(*gpu->batch_items), GFP_KERNEL);
-	if (!gpu->batch_rects || !gpu->batch_items)
+	gpu->batch_polys = devm_kcalloc(dev, DRM_N32H7XX_POLY_BATCH_MAX,
+					sizeof(*gpu->batch_polys), GFP_KERNEL);
+	gpu->batch_poly_items = devm_kcalloc(dev, DRM_N32H7XX_POLY_BATCH_MAX,
+					    sizeof(*gpu->batch_poly_items),
+					    GFP_KERNEL);
+	if (!gpu->batch_rects || !gpu->batch_items || !gpu->batch_polys ||
+	    !gpu->batch_poly_items)
 		return -ENOMEM;
 	init_completion(&gpu->done);
 	gpu->fence_context = dma_fence_context_alloc(1);

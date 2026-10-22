@@ -52,6 +52,7 @@ struct drm_n32h7xx_fill {
 #define DRM_N32H7XX_CURVE	0x06
 #define DRM_N32H7XX_PROFILE	0x07
 #define DRM_N32H7XX_RECT_BATCH	0x08
+#define DRM_N32H7XX_POLY_BATCH	0x09
 
 /*
  * flags bit 0 of DRM_N32H7XX_RECT and DRM_N32H7XX_BLEND: enable the blend
@@ -245,6 +246,29 @@ struct drm_n32h7xx_poly {
 	__s32 y[6];
 };
 
+/* Disable the one-pixel polygon edge ramp. */
+#define DRM_N32H7XX_POLY_NO_AA	0x1
+
+/*
+ * Draw many convex polygons with one job.  polys points at count entries of
+ * struct drm_n32h7xx_poly, which are validated exactly like
+ * DRM_N32H7XX_POLY.  Every entry must name the same handle; format, pitch,
+ * offset, colour, vertices and flags may change from one entry to the next.
+ * Entries are drawn in array order and share one fence.
+ *
+ * count must be 1..DRM_N32H7XX_POLY_BATCH_MAX, polys must not be NULL and
+ * reserved and pad must be zero.  The array is copied in before drawing.
+ */
+#define DRM_N32H7XX_POLY_BATCH_MAX	64
+
+struct drm_n32h7xx_poly_batch {
+	__u32 handle;
+	__u32 count;
+	__u64 polys;
+	__u32 reserved;
+	__u32 pad;
+};
+
 #define DRM_IOCTL_N32H7XX_CREATE \
 	DRM_IOWR(DRM_COMMAND_BASE + DRM_N32H7XX_CREATE, struct drm_n32h7xx_create)
 #define DRM_IOCTL_N32H7XX_FILL \
@@ -260,6 +284,9 @@ struct drm_n32h7xx_poly {
 	DRM_IOW(DRM_COMMAND_BASE + DRM_N32H7XX_BLIT, struct drm_n32h7xx_blit)
 #define DRM_IOCTL_N32H7XX_POLY \
 	DRM_IOW(DRM_COMMAND_BASE + DRM_N32H7XX_POLY, struct drm_n32h7xx_poly)
+#define DRM_IOCTL_N32H7XX_POLY_BATCH \
+	DRM_IOW(DRM_COMMAND_BASE + DRM_N32H7XX_POLY_BATCH, \
+		struct drm_n32h7xx_poly_batch)
 
 /*
  * Filled quadratic curve segment drawn by the pixel-selection unit.  (x1,y1)

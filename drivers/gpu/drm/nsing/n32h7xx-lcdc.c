@@ -8,6 +8,7 @@
 #include <linux/platform_device.h>
 #include <linux/reset.h>
 #include <linux/soc/nsing/n32h7xx-graphics.h>
+#include <linux/workqueue.h>
 
 #include <drm/clients/drm_client_setup.h>
 #include <drm/drm_atomic_helper.h>
@@ -67,15 +68,26 @@
 #define N32H7XX_LCDC_MAX_WIDTH	800
 #define N32H7XX_LCDC_MAX_HEIGHT	480
 
+static bool n32h7xx_lcdc_headless = true;
+module_param_named(headless, n32h7xx_lcdc_headless, bool, 0444);
+MODULE_PARM_DESC(headless,
+		 "Keep LCDC blanked until a framebuffer or DRM client opens (default: true)");
+
 struct n32h7xx_lcdc {
 	struct drm_device drm;
 	struct drm_simple_display_pipe pipe;
 	void __iomem *regs;
 	struct clk *pixel;
+	struct delayed_work headless_work;
 	bool flip_horizontal;
 	bool flip_vertical;
 	bool enabled;
 };
+
+static struct n32h7xx_lcdc *drm_to_lcdc(struct drm_device *drm)
+{
+	return container_of(drm, struct n32h7xx_lcdc, drm);
+}
 
 static void n32h7xx_lcdc_arm_event(struct n32h7xx_lcdc *lcdc,
 				   struct drm_pending_vblank_event *event)
@@ -311,6 +323,37 @@ static const struct drm_mode_config_funcs n32h7xx_lcdc_mode_funcs = {
 	.atomic_commit = drm_atomic_helper_commit,
 };
 
+static void n32h7xx_lcdc_headless_work(struct work_struct *work)
+{
+	struct n32h7xx_lcdc *lcdc = container_of(to_delayed_work(work),
+						  struct n32h7xx_lcdc,
+						  headless_work);
+	struct drm_fb_helper *helper = lcdc->drm.fb_helper;
+
+	if (!n32h7xx_lcdc_headless || atomic_read(&lcdc->drm.open_count) ||
+	    !helper || !helper->info)
+		return;
+
+	fb_blank(helper->info, FB_BLANK_POWERDOWN);
+}
+
+static void n32h7xx_lcdc_postclose(struct drm_device *drm,
+				   struct drm_file *file)
+{
+	struct n32h7xx_lcdc *lcdc = drm_to_lcdc(drm);
+
+	if (!n32h7xx_lcdc_headless)
+		return;
+
+	/*
+	 * drm_release() runs the in-kernel fbdev restore after postclose.
+	 * Defer the headless commit until that restore has finished, while
+	 * allowing a newly opened client to cancel the blank by being present
+	 * in open_count when the work runs.
+	 */
+	schedule_delayed_work(&lcdc->headless_work, msecs_to_jiffies(20));
+}
+
 DEFINE_DRM_GEM_DMA_FOPS(n32h7xx_lcdc_fops);
 
 static const struct drm_driver n32h7xx_lcdc_driver = {
@@ -318,6 +361,7 @@ static const struct drm_driver n32h7xx_lcdc_driver = {
 	DRM_GEM_DMA_DRIVER_OPS,
 	DRM_FBDEV_DMA_DRIVER_OPS,
 	.fops = &n32h7xx_lcdc_fops,
+	.postclose = n32h7xx_lcdc_postclose,
 	.name = "n32h7xx-lcdc",
 	.desc = "NSING N32H7xx LCD controller",
 	.major = 1,
@@ -339,6 +383,7 @@ static int n32h7xx_lcdc_probe(struct platform_device *pdev)
 	if (IS_ERR(lcdc))
 		return PTR_ERR(lcdc);
 	drm = &lcdc->drm;
+	INIT_DELAYED_WORK(&lcdc->headless_work, n32h7xx_lcdc_headless_work);
 	lcdc->flip_horizontal = device_property_read_bool(dev,
 							 "nsing,flip-horizontal");
 	lcdc->flip_vertical = device_property_read_bool(dev,
@@ -422,14 +467,13 @@ static int n32h7xx_lcdc_probe(struct platform_device *pdev)
 		if (ret) {
 			drm_warn(drm, "cannot apply the initial mode: %d\n", ret);
 		} else if (drm->fb_helper->info) {
-			/*
-			 * register_framebuffer() starts fbdev with POWERDOWN whenever
-			 * fb_blank is present.  There is no fbcon on this board, so do
-			 * the normal first unblank that a console would otherwise do.
-			 */
-			ret = fb_blank(drm->fb_helper->info, FB_BLANK_UNBLANK);
+			/* Scanout is demand-driven; camera-only boots stay headless. */
+			ret = fb_blank(drm->fb_helper->info,
+				       n32h7xx_lcdc_headless ?
+				       FB_BLANK_POWERDOWN : FB_BLANK_UNBLANK);
 			if (ret)
-				drm_warn(drm, "cannot unblank the initial mode: %d\n", ret);
+				drm_warn(drm, "cannot set the initial blank state: %d\n",
+					 ret);
 		}
 	}
 #endif
@@ -439,14 +483,20 @@ static int n32h7xx_lcdc_probe(struct platform_device *pdev)
 static void n32h7xx_lcdc_remove(struct platform_device *pdev)
 {
 	struct drm_device *drm = platform_get_drvdata(pdev);
+	struct n32h7xx_lcdc *lcdc = drm_to_lcdc(drm);
 
+	cancel_delayed_work_sync(&lcdc->headless_work);
 	drm_dev_unplug(drm);
 	drm_atomic_helper_shutdown(drm);
 }
 
 static void n32h7xx_lcdc_shutdown(struct platform_device *pdev)
 {
-	drm_atomic_helper_shutdown(platform_get_drvdata(pdev));
+	struct drm_device *drm = platform_get_drvdata(pdev);
+	struct n32h7xx_lcdc *lcdc = drm_to_lcdc(drm);
+
+	cancel_delayed_work_sync(&lcdc->headless_work);
+	drm_atomic_helper_shutdown(drm);
 }
 
 static const struct of_device_id n32h7xx_lcdc_match[] = {

@@ -837,8 +837,8 @@ static const struct ov5640_mode_info ov5640_mode_data[OV5640_NUM_MODES] = {
 				.width	= 320,
 				.height	= 240,
 			},
-			.htot		= 1896,
-			.vblank_def	= 744,
+			.htot		= 1600,
+			.vblank_def	= 758,
 		},
 		.csi2_timings = {
 			/* Feed the full valid pixel array to the ISP. */

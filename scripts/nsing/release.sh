@@ -20,12 +20,15 @@ srctree=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 #                 <STAGE_DIR>/modules; the top-level project passes that and
 #                 merges it into the rootfs SquashFS image.
 #
-#   CAMERA        1: camera DTB; 0 (default): HMI DTB with camera and its
-#                 reserved memory disabled. Does not change .config.
+#   CAMERA        1: apply the camera overlay and enable its reserved pool.
+#                 0 (default): leave the optional camera disabled.
 #
-#   LCD           1 (default): LCDC/GPU and their shared 4 MiB pool.
-#                 0: disable both and return that pool to Linux. Does not
-#                 change .config.
+#   LCD           1 (default): apply the display overlay and enable the
+#                 LCDC/GPU pool. 0: leave both disabled.
+#
+#   Optional devices are FDT overlays on <BOARD>.dtb.  This keeps the number of
+#   device-tree files linear as features are added; neither option changes
+#   .config.
 #
 #   DEFCONFIG     seed configuration: a name under arch/$ARCH/configs/ or a
 #                 path.  It only *seeds* $BUILD_DIR/.config; a configuration
@@ -44,25 +47,15 @@ CROSS_COMPILE=${CROSS_COMPILE:-arm-none-eabi-}
 BOARD=${BOARD:-n32h787-hmi}
 CAMERA=${CAMERA:-0}
 LCD=${LCD:-1}
-dtb_board=$BOARD
+dtb_name=$BOARD.dtb
 case "$CAMERA" in
 1) ;;
-0)
-	if [ "$BOARD" != n32h787-hmi ]; then
-		echo "release.sh: CAMERA=0 is only supported for BOARD=n32h787-hmi" >&2
-		exit 1
-	fi
-	dtb_board=$BOARD-no-camera ;;
+0) ;;
 *) echo "release.sh: CAMERA must be 0 or 1" >&2; exit 1 ;;
 esac
 case "$LCD" in
 1) ;;
-0)
-	if [ "$BOARD" != n32h787-hmi ]; then
-		echo "release.sh: LCD=0 is only supported for BOARD=n32h787-hmi" >&2
-		exit 1
-	fi
-	dtb_board=$dtb_board-no-display ;;
+0) ;;
 *) echo "release.sh: LCD must be 0 or 1" >&2; exit 1 ;;
 esac
 DEFCONFIG=${DEFCONFIG:-nsing_n32h7xx_defconfig}
@@ -111,9 +104,10 @@ mkdir -p "$outdir"
 # Clear only the files we stage.  In the combined project STAGE_DIR is
 # out/kernel, which also holds the out-of-tree build tree in out/kernel/build,
 # so this must never be a blanket removal.
-for staged in zImage "$dtb_board.dtb" System.map config SHA256SUMS; do
+for staged in zImage "$dtb_name" System.map config SHA256SUMS; do
 	rm -f "$outdir/$staged"
 done
+rm -f "$outdir/$BOARD"-*.dtb
 
 if [ "$BUILD_DIR" = "$srctree" ]; then
 	bindir="$srctree/arch/arm/boot"
@@ -124,13 +118,39 @@ else
 fi
 
 image="$bindir/zImage"
-dtb="$dtbdir/$dtb_board.dtb"
+base_dtb="$dtbdir/$BOARD.dtb"
+dtb="$outdir/$dtb_name"
+fdtoverlay="${BUILD_DIR%/}/scripts/dtc/fdtoverlay"
 
 test -s "$image"
-test -s "$dtb"
+test -s "$base_dtb"
+test -x "$fdtoverlay"
 
 cp "$image" "$outdir/zImage"
-cp "$dtb" "$outdir/$dtb_board.dtb"
+
+# Apply only the selected feature overlays.  The bootloader still sees one
+# ordinary flattened DTB, and adding another optional feature later does not
+# multiply board files or require a bootloader-side FDT resolver.
+set --
+if [ "$CAMERA" = 1 ]; then
+	overlay="$dtbdir/$BOARD-camera.dtbo"
+	test -s "$overlay"
+	set -- "$@" "$overlay"
+fi
+if [ "$LCD" = 1 ]; then
+	overlay="$dtbdir/$BOARD-display.dtbo"
+	test -s "$overlay"
+	set -- "$@" "$overlay"
+fi
+
+if [ "$#" -eq 0 ]; then
+	cp "$base_dtb" "$dtb"
+else
+	overlay_tmp="$outdir/.$dtb_name.overlay.tmp"
+	rm -f "$overlay_tmp"
+	"$fdtoverlay" -i "$base_dtb" -o "$overlay_tmp" "$@"
+	mv "$overlay_tmp" "$dtb"
+fi
 if [ "$BUILD_DIR" != "$srctree" ]; then
 	cp "$BUILD_DIR/System.map" "$outdir/System.map"
 	cp "$BUILD_DIR/.config" "$outdir/config"
@@ -139,13 +159,13 @@ else
 	cp "$srctree/.config" "$outdir/config"
 fi
 
-(cd "$outdir" && sha256sum zImage "$dtb_board.dtb" \
+(cd "$outdir" && sha256sum zImage "$dtb_name" \
 	System.map config > SHA256SUMS)
 
 # The version is only reported, never used to build a path.
 printf 'kernel:  %s\n' "$(make -s -C "$srctree" $make_args kernelrelease)"
 printf 'stage:   %s\n' "$outdir"
 printf 'zImage:  %s (%s bytes)\n' "$outdir/zImage" "$(wc -c <"$outdir/zImage")"
-printf 'dtb:     %s (%s bytes)\n' "$outdir/$dtb_board.dtb" "$(wc -c <"$outdir/$dtb_board.dtb")"
+printf 'dtb:     %s (%s bytes)\n' "$dtb" "$(wc -c <"$dtb")"
 printf 'modules: %s (%s .ko)\n' "$MODULES_DIR" \
 	"$(find "$MODULES_DIR" -name '*.ko' | wc -l)"

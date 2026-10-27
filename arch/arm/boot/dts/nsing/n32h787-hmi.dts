@@ -19,8 +19,7 @@
 /memreserve/ 0xc1e00000 0x00010000;
 
 #include <dt-bindings/gpio/gpio.h>
-#include <dt-bindings/interrupt-controller/irq.h>
-#include <dt-bindings/media/video-interfaces.h>
+#include <dt-bindings/leds/common.h>
 #include "n32h7xx.dtsi"
 
 / {
@@ -44,47 +43,31 @@
 		serial0 = &usart1;
 		usb0 = &usb1;
 		usb1 = &usb2;
-		i2c1 = &i2c1;
 		i2c4 = &i2c4;
 	};
 
-	lcd_power: regulator-lcd {
-		compatible = "regulator-fixed";
-		regulator-name = "lcd-3v3";
-		regulator-min-microvolt = <3300000>;
-		regulator-max-microvolt = <3300000>;
-	};
+	leds {
+		compatible = "gpio-leds";
 
-	lcd_backlight: backlight {
-		compatible = "gpio-backlight";
-		gpios = <&gpioh 3 GPIO_ACTIVE_HIGH>;
-	};
-
-	panel: panel {
-		compatible = "nsing,n32h787-hmi-lcd", "panel-dpi";
-		power-supply = <&lcd_power>;
-		enable-gpios = <&gpiob 10 GPIO_ACTIVE_HIGH>;
-		backlight = <&lcd_backlight>;
-		/* NTW430T40X005A / ST7262: 25 MHz, 816 x 496 total. */
-		panel-timing {
-			clock-frequency = <25000000>;
-			hactive = <800>;
-			vactive = <480>;
-			hsync-len = <4>;
-			hback-porch = <8>;
-			hfront-porch = <4>;
-			vsync-len = <4>;
-			vback-porch = <8>;
-			vfront-porch = <4>;
-			hsync-active = <0>;
-			vsync-active = <0>;
-			de-active = <0>;
-			pixelclk-active = <1>;
+		led-red {
+			label = "red";
+			gpios = <&gpiob 3 GPIO_ACTIVE_LOW>;
+			color = <LED_COLOR_ID_RED>;
+			default-state = "off";
 		};
-		port {
-			panel_in: endpoint {
-				remote-endpoint = <&lcdc_out>;
-			};
+
+		led-green {
+			label = "green";
+			gpios = <&gpiof 10 GPIO_ACTIVE_LOW>;
+			color = <LED_COLOR_ID_GREEN>;
+			default-state = "off";
+		};
+
+		led-blue {
+			label = "blue";
+			gpios = <&gpioi 8 GPIO_ACTIVE_LOW>;
+			color = <LED_COLOR_ID_BLUE>;
+			default-state = "off";
 		};
 	};
 
@@ -95,73 +78,6 @@
 		regulator-max-microvolt = <5000000>;
 		gpio = <&gpiob 4 GPIO_ACTIVE_HIGH>;
 		enable-active-high;
-	};
-
-	/*
-	 * The OV5640 module carries its own 1.8 V / 2.8 V / 1.5 V regulators,
-	 * so the three sensor rails are always on and only exist to satisfy the
-	 * driver's supply lookups.
-	 */
-	ov5640_dovdd: regulator-ov5640-dovdd {
-		compatible = "regulator-fixed";
-		regulator-name = "ov5640-dovdd";
-		regulator-min-microvolt = <1800000>;
-		regulator-max-microvolt = <1800000>;
-	};
-
-	ov5640_avdd: regulator-ov5640-avdd {
-		compatible = "regulator-fixed";
-		regulator-name = "ov5640-avdd";
-		regulator-min-microvolt = <2800000>;
-		regulator-max-microvolt = <2800000>;
-	};
-
-	ov5640_dvdd: regulator-ov5640-dvdd {
-		compatible = "regulator-fixed";
-		regulator-name = "ov5640-dvdd";
-		regulator-min-microvolt = <1500000>;
-		regulator-max-microvolt = <1500000>;
-	};
-
-	/* The sensor module's own 24 MHz oscillator: no SoC clock is routed. */
-	clk_ov5640: clock-ov5640 {
-		compatible = "fixed-clock";
-		#clock-cells = <0>;
-		clock-frequency = <24000000>;
-	};
-
-	/*
-	 * The touch controller shares the HMI panel power/reset path and uses
-	 * PD4/PD5 for I2C1.  There is no hardware I2C1 controller driver yet,
-	 * so expose the bus as i2c-gpio while preserving the hardware bus
-	 * number through the alias above.
-	 */
-	i2c1: i2c1 {
-		compatible = "i2c-gpio";
-		#address-cells = <1>;
-		#size-cells = <0>;
-		pinctrl-names = "default";
-		pinctrl-0 = <&i2c1_pins>;
-		scl-gpios = <&gpiod 4 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
-		sda-gpios = <&gpiod 5 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
-		i2c-gpio,delay-us = <5>;
-
-		touchscreen@5d {
-			compatible = "goodix,gt911";
-			reg = <0x5d>;
-			interrupt-parent = <&gpiod>;
-			interrupts = <11 IRQ_TYPE_EDGE_FALLING>;
-			pinctrl-names = "default";
-			pinctrl-0 = <&touch_control_pins>;
-			reset-gpios = <&gpiod 6 GPIO_ACTIVE_HIGH>;
-			AVDD28-supply = <&lcd_power>;
-			VDDIO-supply = <&lcd_power>;
-			touchscreen-size-x = <800>;
-			touchscreen-size-y = <480>;
-			touchscreen-inverted-x;
-			touchscreen-inverted-y;
-			status = "okay";
-		};
 	};
 
 	/*
@@ -185,71 +101,6 @@
 			compatible = "wlf,wm8978";
 			reg = <0x1a>;
 			#sound-dai-cells = <0>;
-		};
-
-		/*
-		 * OV5640 camera module on the DVP1 connector.  It has no
-		 * external clock input on this board: the module carries its
-		 * own 24 MHz oscillator, so "xclk" is a fixed-clock stand-in
-		 * that only tells the driver what rate the sensor is clocked
-		 * at.  Reset is DVP1_RST on PC13 (active low).
-		 *
-		 * The endpoint polarity matches the sensor's own default
-		 * programming: the capture port is fed a stream with HSYNC
-		 * active high, VSYNC active low and the pixel clock sampled on
-		 * the rising edge, which is what the DVP PORTCFG on this board
-		 * is set up for.  Only the low eight data lines are wired, and
-		 * they come from the sensor's D[9:2], so the bus is 8-bit.
-		 */
-		ov5640: camera@3c {
-			compatible = "ovti,ov5640";
-			reg = <0x3c>;
-			clocks = <&clk_ov5640>;
-			clock-names = "xclk";
-			DOVDD-supply = <&ov5640_dovdd>;
-			AVDD-supply = <&ov5640_avdd>;
-			DVDD-supply = <&ov5640_dvdd>;
-			/*
-			 * Ceiling on the parallel byte clock.  The DVP receive
-			 * path on this board is clean up to 96 MHz; above that
-			 * the port starts truncating frames.  Modes that would
-			 * ask for more are run with a slower system clock, which
-			 * lowers PCLK without changing the frame geometry.
-			 */
-			ovti,max-dvp-pclk-hz = <96000000>;
-			/*
-			 * PC13 is the module's RESETB and the only camera control
-			 * line wired: the module has no separate PWDN.  RESETB is
-			 * active low and must be driven high before the sensor
-			 * answers on SCCB.
-			 *
-			 * It is declared here as the powerdown line on purpose.
-			 * ov5640_powerup_sequence() only ever toggles a reset line
-			 * when a powerdown line is present; with reset-gpios alone
-			 * it requests the line asserted (GPIOD_OUT_HIGH on an
-			 * active-low reset = driven low) and never releases it,
-			 * which holds this sensor in reset and makes every SCCB
-			 * transfer fail.  The polarity works out in our favour:
-			 * with GPIO_ACTIVE_LOW the driver's "power up" releases
-			 * RESETB and its "power down" asserts it, including the
-			 * t2/t3/t4 delays from the datasheet.
-			 *
-			 * Do not "correct" this to reset-gpios.
-			 */
-			powerdown-gpios = <&gpioc 13 GPIO_ACTIVE_LOW>;
-			status = "okay";
-
-			port {
-				ov5640_ep: endpoint {
-					remote-endpoint = <&dvp1_ep>;
-					bus-type = <MEDIA_BUS_TYPE_PARALLEL>;
-					bus-width = <8>;
-					data-shift = <2>;
-					hsync-active = <1>;
-					vsync-active = <0>;
-					pclk-sample = <1>;
-				};
-			};
 		};
 	};
 
@@ -282,54 +133,23 @@
 		ranges;
 
 		/*
-		 * Capture buffers for the DVP port.  The port writes a whole
-		 * frame per buffer and there is no MMU behind it, so every
-		 * buffer is one physically contiguous run; reserving the run
-		 * here is what keeps it available at any point in the board's
-		 * life, long after the general allocator has been chipped down
-		 * to 512 KiB blocks.
-		 *
-		 * 2 MiB, sized from measurement rather than from the port.  FBS
-		 * is a 22-bit size, so a frame *may* reach 4 MiB, but OV5640
-		 * JPEG at 2592x1944 -- the only stream here that wants more
-		 * than the raw formats -- comes back at 0.86-0.90 MiB in real
-		 * scenes, so 2 MiB leaves better than 2x headroom and hands the
-		 * other 2 MiB back to the kernel.  An overflow would not be
-		 * silent: the port stops at the programmed size and raises
-		 * M1OF, which the driver reports as a failed frame.
-		 *
-		 * This is the lowest reservation in the SDRAM band on purpose.
-		 * With CAMERA=0 the node is disabled, and because nothing sits
-		 * below it the 2 MiB joins the main RAM window instead of
-		 * becoming an island between two reserved pools.  The no-display
-		 * variant moves it to the top of the band, where the graphics
-		 * pool below it no longer exists; see
-		 * n32h787-hmi-no-display.dtsi.
-		 *
-		 * It stays clear of the bootloader's DTB slot at 0xC1E00000
-		 * (BOOT_DTB_LOAD_ADDR in bootloader/CM7/src/boot_app.c).  The
-		 * kernel keeps the flat tree the bootloader handed it for the
-		 * whole run, so a capture must never overwrite that slot.
+		 * Optional devices allocate their large DMA pools from one
+		 * contiguous band.  Each pool stays disabled here and is enabled
+		 * by exactly one feature overlay, so feature combinations never
+		 * need separate board DTS files or duplicate the address map.
 		 */
-		cam_dma_pool: dma-pool@c1800000 {
+		graphics_dma_pool: dma-pool@c1900000 {
 			compatible = "shared-dma-pool";
-			reg = <0xc1800000 0x00200000>;
+			reg = <0xc1900000 0x00300000>;
 			no-map;
+			status = "disabled";
 		};
 
-		/*
-		 * Shared allocation bitmap for LCDC scanout and GPU GEM buffers.
-		 * The panel contract is 800x480 RGB565, so three 750 KiB frames
-		 * (fbdev plus two application buffers) fit with room for the GPU's
-		 * 16 KiB command stream and bookkeeping.
-		 * Kept above the capture pool so the optional pool can be given
-		 * back without leaving a hole; the no-display variant removes
-		 * this pool entirely instead of moving it.
-		 */
-		graphics_dma_pool: dma-pool@c1a00000 {
+		cam_dma_pool: dma-pool@c1c00000 {
 			compatible = "shared-dma-pool";
-			reg = <0xc1a00000 0x00300000>;
+			reg = <0xc1c00000 0x00200000>;
 			no-map;
+			status = "disabled";
 		};
 
 		/* Scanline, descriptor and coefficient storage for the JPEG codec. */
@@ -361,85 +181,10 @@
  * signal that peripheral has on each pin, or an exact signal name.
  */
 &pinctrl {
-	lcdc_pins: lcdc-pins {
-		data-pins {
-			pins = "PJ1", "PJ2", "PI11", "PK3", "PK4", "PG7", "PI12", "PI13", "PK7";
-			function = "lcd";
-			bias-pull-up;
-			drive-strength = <2>;
-			slew-rate = <0>;
-		};
-		tolerant-data-pins {
-			pins = "PJ3", "PJ4", "PJ5", "PJ6", "PJ7", "PJ8", "PJ9", "PJ10", "PJ11", "PK0", "PD3", "PJ14", "PJ15", "PB9";
-			function = "lcd";
-			bias-pull-up;
-			drive-strength = <1>;
-			slew-rate = <0>;
-		};
-		lcd-r0-pins {
-			pins = "PI15";
-			function = "lcd_r0";
-			bias-pull-up;
-			drive-strength = <1>;
-			slew-rate = <0>;
-		};
-		lcd-r1-pins {
-			pins = "PJ0";
-			function = "lcd_r1";
-			bias-pull-up;
-			drive-strength = <1>;
-			slew-rate = <0>;
-		};
-		lcd-b0-pins {
-			pins = "PJ12";
-			function = "lcd_b0";
-			bias-pull-up;
-			drive-strength = <1>;
-			slew-rate = <0>;
-		};
-		lcd-b1-pins {
-			pins = "PJ13";
-			function = "lcd_b1";
-			bias-pull-up;
-			drive-strength = <1>;
-			slew-rate = <0>;
-		};
-		lcd-b6-pins {
-			pins = "PA15";
-			function = "lcd_b6";
-			bias-pull-up;
-			drive-strength = <1>;
-			slew-rate = <0>;
-		};
-	};
-
-	lcd_control_pins: lcd-control-pins {
-		pins = "PB10", "PH3";
-		bias-pull-up;
-		drive-strength = <2>;
-		slew-rate = <0>;
-	};
-
 	i2c4_pins: i2c4-pins {
 		pins = "PD12", "PD13";
 		bias-pull-up;
 		drive-strength = <3>;
-	};
-
-	i2c1_pins: i2c1-pins {
-		pins = "PD4", "PD5";
-		function = "gpio";
-		bias-pull-up;
-		drive-strength = <3>;
-		slew-rate = <0>;
-	};
-
-	touch_control_pins: touch-control-pins {
-		pins = "PD6", "PD11";
-		function = "gpio";
-		bias-pull-up;
-		drive-strength = <1>;
-		slew-rate = <0>;
 	};
 
 	audio_pins: audio-pins {
@@ -536,31 +281,6 @@
 		};
 	};
 
-	/*
-	 * DVP2 parallel camera port: eight data lines, pixel clock and the two
-	 * sync signals.  Every pin resolves to its one dvp2_* alternate
-	 * function from the "dvp2" prefix, so the group does not have to spell
-	 * the eight signal names out.
-	 */
-	dvp2_pins: dvp2-pins {
-		pins = "PE2", "PE3", "PK5", "PK6",
-		       "PI14", "PK2", "PK1", "PC3",
-		       "PH5", "PH4", "PF9";
-		function = "dvp2";
-		bias-disable;
-		drive-strength = <3>;
-		slew-rate = <0>;
-	};
-
-	dvp1_pins: dvp1-pins {
-		pins = "PC6", "PC7", "PB13", "PG11",
-		       "PE4", "PB6", "PE5", "PE6",
-		       "PA6", "PA4", "PB7";
-		function = "dvp1";
-		bias-disable;
-		drive-strength = <3>;
-		slew-rate = <0>;
-	};
 };
 
 &usb1_phy {
@@ -755,50 +475,8 @@
 	status = "okay";
 };
 
-/*
- * DVP1 with the OV5640 on the camera connector.  Capture is one frame at a
- * time into a V4L2 buffer; see doc/camera.md.
- */
-&dvp1 {
-	pinctrl-names = "default";
-	pinctrl-0 = <&dvp1_pins>;
-	memory-region = <&cam_dma_pool>;
-	status = "okay";
-
-	port {
-		dvp1_ep: endpoint {
-			remote-endpoint = <&ov5640_ep>;
-			bus-type = <MEDIA_BUS_TYPE_PARALLEL>;
-			bus-width = <8>;
-			hsync-active = <1>;
-			vsync-active = <0>;
-			pclk-sample = <1>;
-		};
-	};
-};
-
 /* The hardware JPEG codec is independent of camera capture. */
 &jpeg {
 	memory-region = <&jpeg_dma_pool>;
-	status = "okay";
-};
-
-&lcdc {
-	pinctrl-names = "default";
-	pinctrl-0 = <&lcdc_pins &lcd_control_pins>;
-	memory-region = <&graphics_dma_pool>;
-	nsing,flip-horizontal;
-	nsing,flip-vertical;
-	status = "okay";
-
-	port {
-		lcdc_out: endpoint {
-			remote-endpoint = <&panel_in>;
-		};
-	};
-};
-
-&gpu {
-	memory-region = <&graphics_dma_pool>;
 	status = "okay";
 };

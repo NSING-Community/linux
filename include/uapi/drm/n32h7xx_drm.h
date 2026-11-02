@@ -53,6 +53,7 @@ struct drm_n32h7xx_fill {
 #define DRM_N32H7XX_PROFILE	0x07
 #define DRM_N32H7XX_RECT_BATCH	0x08
 #define DRM_N32H7XX_POLY_BATCH	0x09
+#define DRM_N32H7XX_POLY_CLIP_BATCH 0x0a
 
 /*
  * flags bit 0 of DRM_N32H7XX_RECT and DRM_N32H7XX_BLEND: enable the blend
@@ -268,6 +269,31 @@ struct drm_n32h7xx_poly_batch {
 	__u32 reserved;
 	__u32 pad;
 };
+
+/*
+ * Polygon batch with one common integer clip rectangle. The polygon array
+ * and its validation match POLY_BATCH. x/y and width/height are pixels
+ * relative to each polygon's framebuffer origin (offset), not its vertices.
+ * The rectangle must fit its buffer and pitch. Clipping changes enumeration
+ * bounds, preserving the original edge coefficients and antialiasing.
+ * An empty polygon/clip intersection is a successful no-op. A zero width or
+ * height, or nonzero reserved/pad is invalid. Old ioctl layouts are unchanged.
+ */
+struct drm_n32h7xx_poly_clip_batch {
+	__u32 handle;
+	__u32 count;
+	__u64 polys;
+	__u32 x;
+	__u32 y;
+	__u32 width;
+	__u32 height;
+	__u32 reserved;
+	__u32 pad;
+};
+
+#define DRM_IOCTL_N32H7XX_POLY_CLIP_BATCH \
+	DRM_IOW(DRM_COMMAND_BASE + DRM_N32H7XX_POLY_CLIP_BATCH, \
+		struct drm_n32h7xx_poly_clip_batch)
 
 #define DRM_IOCTL_N32H7XX_CREATE \
 	DRM_IOWR(DRM_COMMAND_BASE + DRM_N32H7XX_CREATE, struct drm_n32h7xx_create)

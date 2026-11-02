@@ -121,8 +121,8 @@
 #define GPU_PFC_EVENT_MAX	69
 
 /*
- * The command buffer is one page.  A profiling job is a fixed head that
- * clears and programs the counters, one rectangle body per iteration, and a
+ * The command buffer is GPU_STREAM_SIZE bytes.  A profiling job has a fixed
+ * head that clears and programs the counters, one rectangle per iteration, and a
  * fixed tail that waits for the pipeline, dumps the four counter registers and
  * switches the counters off again.  The per-iteration estimate is rounded up
  * from the 28 words the rectangle body really writes so that the job can
@@ -291,8 +291,8 @@ struct n32h7xx_gpu {
 	u64 fence_context;
 	u64 seqno;
 	bool wedged;
-	struct drm_gem_object *stuck;
-	/* Reused so a batch ioctl does not allocate on every call. */
+	struct drm_gem_object *stuck[2];
+	/* DRM lifetime: an in-flight batch ioctl may outlive platform unbind. */
 	struct mutex batch_lock;
 	struct drm_n32h7xx_rect *batch_rects;
 	struct n32h7xx_batch_item *batch_items;
@@ -390,6 +390,7 @@ struct n32h7xx_poly_batch_item {
 };
 
 struct n32h7xx_poly_batch {
+	const struct drm_n32h7xx_poly_clip_batch *clip;
 	const struct drm_n32h7xx_poly *polys;
 	struct n32h7xx_poly_batch_item *item;
 	unsigned int count;
@@ -402,6 +403,7 @@ struct n32h7xx_job {
 		     dma_addr_t addr);
 	const struct n32h7xx_draw *draw;
 	const struct drm_n32h7xx_poly *poly;
+	const struct drm_n32h7xx_poly_clip_batch *clip;
 	const struct drm_n32h7xx_curve *curve;
 	struct n32h7xx_batch *batch;
 	struct n32h7xx_poly_batch *poly_batch;
@@ -926,6 +928,53 @@ static int n32h7xx_poly_edge(struct n32h7xx_edge *edge,
 	return 0;
 }
 
+static int n32h7xx_gpu_clip_poly(struct drm_gem_object *obj,
+				 struct n32h7xx_job *job)
+{
+	const struct drm_n32h7xx_poly_clip_batch *clip = job->clip;
+	const struct drm_n32h7xx_poly *poly = job->poly;
+	struct n32h7xx_poly_geom *geom = &job->geom;
+	u32 old_x = geom->xmin, old_y = geom->ymin;
+	u64 end;
+	unsigned int i;
+
+	if (!clip->width || !clip->height ||
+	    clip->x > N32H7XX_POLY_LIMIT || clip->y > N32H7XX_POLY_LIMIT ||
+	    clip->width > 4096 || clip->height > 4096 ||
+	    (u64)clip->x + clip->width > job->pitch_px ||
+	    (u64)clip->y + clip->height > N32H7XX_POLY_LIMIT + 1)
+		return -EINVAL;
+	end = (u64)poly->offset +
+	      ((u64)clip->y + clip->height - 1) * poly->pitch +
+	      ((u64)clip->x + clip->width) * job->cpp;
+	if (end > obj->size)
+		return -EINVAL;
+
+	geom->xmin = max(geom->xmin, clip->x);
+	geom->ymin = max(geom->ymin, clip->y);
+	geom->xmax = min(geom->xmax, clip->x + clip->width - 1);
+	geom->ymax = min(geom->ymax, clip->y + clip->height - 1);
+	if (geom->xmin > geom->xmax || geom->ymin > geom->ymax) {
+		geom->count = 0;
+		return 0;
+	}
+	for (i = 0; i < geom->count; i++) {
+		struct n32h7xx_edge *edge = &geom->edge[i];
+		s64 start = edge->vstart +
+			    (s64)edge->dx * (geom->xmin - old_x) +
+			    (s64)edge->dy * (geom->ymin - old_y);
+
+		/*
+		 * Advance the quantised edge exactly as hardware would.
+		 * Recomputing the division at the clipped origin changes AA.
+		 */
+		if (start > S32_MAX || start < S32_MIN)
+			return -EINVAL;
+		edge->vstart = start;
+	}
+	return 0;
+}
+
 static int n32h7xx_gpu_validate_poly(struct drm_gem_object *obj,
 				     struct n32h7xx_job *job)
 {
@@ -997,6 +1046,12 @@ static int n32h7xx_gpu_validate_poly(struct drm_gem_object *obj,
 	else
 		geom->ymax = gy1;
 
+	/* Include the antialiasing ramp in the final buffer bounds check. */
+	end = (u64)args->offset + (u64)geom->ymax * args->pitch +
+	      (geom->xmax + 1) * cpp;
+	if (end > obj->size)
+		return -EINVAL;
+
 	for (i = 0; i < args->vertex_count; i++) {
 		ret = n32h7xx_poly_edge(&geom->edge[i], args, i, cx, cy,
 					geom->xmin << 16, geom->ymin << 16,
@@ -1007,7 +1062,7 @@ static int n32h7xx_gpu_validate_poly(struct drm_gem_object *obj,
 	job->cpp = cpp;
 	job->org = org;
 	job->pitch_px = pitch_px;
-	return 0;
+	return job->clip ? n32h7xx_gpu_clip_poly(obj, job) : 0;
 }
 
 static int n32h7xx_gpu_validate_poly_batch(struct drm_gem_object *obj,
@@ -1020,6 +1075,7 @@ static int n32h7xx_gpu_validate_poly_batch(struct drm_gem_object *obj,
 		struct n32h7xx_poly_batch_item *item = &batch->item[i];
 		struct n32h7xx_job one = {
 			.poly = &batch->polys[i],
+			.clip = batch->clip,
 		};
 		int ret;
 
@@ -1184,6 +1240,12 @@ static int n32h7xx_gpu_validate_curve(struct drm_gem_object *obj,
 	else
 		geom->ymax = gy1;
 
+	/* Include the antialiasing ramp in the final buffer bounds check. */
+	end = (u64)args->offset + (u64)geom->ymax * args->pitch +
+	      (geom->xmax + 1) * cpp;
+	if (end > obj->size)
+		return -EINVAL;
+
 	ret = n32h7xx_curve_leg(&geom->edge[0], x[0], y[0], x[1], y[1],
 				x[2], y[2], geom->xmin << 16, geom->ymin << 16);
 	if (ret)
@@ -1237,6 +1299,9 @@ static unsigned int n32h7xx_gpu_emit_poly_body(const struct n32h7xx_job *job,
 	/* The destination is read: the blend unit needs it for both the
 	 * source-over alpha and the coverage ramp.
 	 */
+	if (!job->geom.count)
+		return 0;
+
 	s[n++] = GPU_OP_WRITE(GPU_FBS_CONFIG, 3);
 	s[n++] = GPU_FBS_ALPHA_PASS | GPU_FBS_READ_FOR_BLEND;
 	s[n++] = job->pitch_px;
@@ -1282,7 +1347,7 @@ static unsigned int n32h7xx_gpu_emit_poly_body(const struct n32h7xx_job *job,
 	s[n++] = 0;
 	s[n++] = GPU_BLU_WRITE_ALL | GPU_BLU_WRITE_COVERAGE;
 	s[n++] = GPU_OP_WRITE(GPU_PSU_BBOX_MIN, 4);
-	s[n++] = geom->xmin;
+	s[n++] = (geom->ymin << 16) | geom->xmin;
 	s[n++] = (geom->ymax << 16) | geom->xmax;
 	s[n++] = geom->ymin << 16;
 	s[n++] = ctrl;
@@ -1341,6 +1406,8 @@ static void n32h7xx_gpu_emit_poly_batch(struct n32h7xx_gpu *gpu,
  * long job does not burn CPU.
  */
 #define GPU_SPIN_US	40
+/* At least 32 KiB of destination writes: longer than the spin budget. */
+#define GPU_SPIN_MAX_PIXELS	16384
 
 static bool n32h7xx_gpu_wait_spin(struct n32h7xx_gpu *gpu)
 {
@@ -1356,7 +1423,7 @@ static bool n32h7xx_gpu_wait_spin(struct n32h7xx_gpu *gpu)
 	return false;
 }
 
-static int n32h7xx_gpu_run(struct n32h7xx_gpu *gpu)
+static int n32h7xx_gpu_run(struct n32h7xx_gpu *gpu, bool spin)
 {
 	u32 status;
 	int ret;
@@ -1370,7 +1437,7 @@ static int n32h7xx_gpu_run(struct n32h7xx_gpu *gpu)
 	dma_wmb();
 	writel(gpu->stream_dma, gpu->regs + GPU_STREAM_ADDR);
 	/* Do not drop buffer references on a signal while DMA is in progress. */
-	if (!n32h7xx_gpu_wait_spin(gpu) &&
+	if ((!spin || !n32h7xx_gpu_wait_spin(gpu)) &&
 	    !wait_for_completion_timeout(&gpu->done, GPU_TIMEOUT)) {
 		ret = -ETIMEDOUT;
 		goto reset;
@@ -1454,7 +1521,8 @@ static int n32h7xx_gpu_exec(struct drm_device *drm, struct drm_file *file,
 	dma_resv_add_fence(obj->resv, &fence->base, DMA_RESV_USAGE_WRITE);
 	dma_resv_unlock(obj->resv);
 	job->emit(gpu, job, to_drm_gem_dma_obj(obj)->dma_addr);
-	ret = n32h7xx_gpu_run(gpu);
+	ret = n32h7xx_gpu_run(gpu, !job->draw ||
+		(u64)job->draw->width * job->draw->height < GPU_SPIN_MAX_PIXELS);
 	if (!ret && job->profile) {
 		unsigned int i;
 
@@ -1464,7 +1532,7 @@ static int n32h7xx_gpu_exec(struct drm_device *drm, struct drm_file *file,
 	if (gpu->wedged) {
 		/* An unconfirmed reset must never return live DMA memory to a pool. */
 		drm_gem_object_get(obj);
-		gpu->stuck = obj;
+		gpu->stuck[0] = obj;
 	}
 	if (ret)
 		dma_fence_set_error(&fence->base, ret);
@@ -1580,13 +1648,19 @@ static int n32h7xx_gpu_poly(struct drm_device *drm, void *data,
 	return n32h7xx_gpu_exec(drm, file, poly->handle, &job);
 }
 
-static int n32h7xx_gpu_poly_batch(struct drm_device *drm, void *data,
-				  struct drm_file *file)
+static int n32h7xx_gpu_submit_poly_batch(struct drm_device *drm,
+				       struct drm_file *file, u32 handle,
+				       u32 count, u64 polys,
+				       const struct drm_n32h7xx_poly_clip_batch *clip)
 {
-	struct drm_n32h7xx_poly_batch *args = data;
 	struct n32h7xx_gpu *gpu = container_of(drm, struct n32h7xx_gpu, drm);
-	struct n32h7xx_draw draw = { .handle = args->handle };
-	struct n32h7xx_poly_batch batch;
+	struct n32h7xx_draw draw = { .handle = handle };
+	struct n32h7xx_poly_batch batch = {
+		.polys = gpu->batch_polys,
+		.item = gpu->batch_poly_items,
+		.count = count,
+		.clip = clip,
+	};
 	struct n32h7xx_job job = {
 		.validate = n32h7xx_gpu_validate_poly_batch,
 		.emit = n32h7xx_gpu_emit_poly_batch,
@@ -1595,22 +1669,40 @@ static int n32h7xx_gpu_poly_batch(struct drm_device *drm, void *data,
 	};
 	int ret;
 
-	if (args->reserved || args->pad || !args->count || !args->polys ||
-	    args->count > DRM_N32H7XX_POLY_BATCH_MAX)
+	if (!count || !polys || count > DRM_N32H7XX_POLY_BATCH_MAX)
 		return -EINVAL;
 	if (mutex_lock_interruptible(&gpu->batch_lock))
 		return -ERESTARTSYS;
-	if (copy_from_user(gpu->batch_polys, u64_to_user_ptr(args->polys),
-			   array_size(args->count, sizeof(*gpu->batch_polys)))) {
+	if (copy_from_user(gpu->batch_polys, u64_to_user_ptr(polys),
+			   array_size(count, sizeof(*gpu->batch_polys)))) {
 		mutex_unlock(&gpu->batch_lock);
 		return -EFAULT;
 	}
-	batch.polys = gpu->batch_polys;
-	batch.item = gpu->batch_poly_items;
-	batch.count = args->count;
 	ret = n32h7xx_gpu_exec(drm, file, draw.handle, &job);
 	mutex_unlock(&gpu->batch_lock);
 	return ret;
+}
+
+static int n32h7xx_gpu_poly_batch(struct drm_device *drm, void *data,
+				  struct drm_file *file)
+{
+	const struct drm_n32h7xx_poly_batch *args = data;
+
+	if (args->reserved || args->pad)
+		return -EINVAL;
+	return n32h7xx_gpu_submit_poly_batch(drm, file, args->handle, args->count,
+					   args->polys, NULL);
+}
+
+static int n32h7xx_gpu_poly_clip_batch(struct drm_device *drm, void *data,
+				       struct drm_file *file)
+{
+	const struct drm_n32h7xx_poly_clip_batch *args = data;
+
+	if (args->reserved || args->pad)
+		return -EINVAL;
+	return n32h7xx_gpu_submit_poly_batch(drm, file, args->handle, args->count,
+					   args->polys, args);
 }
 
 static int n32h7xx_gpu_curve(struct drm_device *drm, void *data,
@@ -1671,13 +1763,21 @@ static u32 n32h7xx_float_div(u32 num, u32 den)
  * Normalised start of one source axis that `extent` destination pixels step
  * through: half a destination step plus the bias, from either end.
  */
-static u32 n32h7xx_axis_start(u32 size, u32 extent, bool mirrored)
+static u32 n32h7xx_axis_start(u32 size, u32 extent, bool mirrored,
+			     int x_offset)
 {
 	u32 den = 4 * extent * size;
+	s64 num = mirrored ? den - 2 * size - 1 : 2 * size + 1;
 
-	if (!mirrored)
-		return n32h7xx_float_div(2 * size + 1, den);
-	return n32h7xx_float_div(den - 2 * size - 1, den);
+	/*
+	 * The framebuffer address is aligned down, so enumeration starts at
+	 * xmin rather than zero. Cancel the texture step from that X origin,
+	 * including the V axis when rotation maps X onto source rows.
+	 */
+	num -= (s64)4 * size * x_offset;
+	if (num < 0)
+		return N32H7XX_FLOAT_NEG(n32h7xx_float_div(-num, den));
+	return n32h7xx_float_div(num, den);
 }
 
 static int n32h7xx_blit_format(u32 format, u32 *cpp, u32 *org, u32 *tex_org)
@@ -1817,9 +1917,11 @@ static int n32h7xx_gpu_blit_validate(struct drm_gem_object **objs,
 	step_x = n32h7xx_float_div(1, args->width);
 	step_y = n32h7xx_float_div(1, args->height);
 	blit->u0 = n32h7xx_axis_start(args->src_width, u_extent,
-				      (ux ? ux : uy) < 0);
+				      (ux ? ux : uy) < 0,
+				      ux * (int)blit->xmin);
 	blit->v0 = n32h7xx_axis_start(args->src_height, v_extent,
-				      (vx ? vx : vy) < 0);
+				      (vx ? vx : vy) < 0,
+				      vx * (int)blit->xmin);
 	blit->dux = ux ? (ux > 0 ? step_x : N32H7XX_FLOAT_NEG(step_x)) : 0;
 	blit->duy = uy ? (uy > 0 ? step_y : N32H7XX_FLOAT_NEG(step_y)) : 0;
 	blit->dvx = vx ? (vx > 0 ? step_x : N32H7XX_FLOAT_NEG(step_x)) : 0;
@@ -1941,7 +2043,7 @@ static int n32h7xx_gpu_exec_blit(struct drm_device *drm, struct drm_file *file,
 		goto unlock;
 	for (i = 0; i < 2; i++) {
 		waited = dma_resv_wait_timeout(objs[i]->resv,
-					       DMA_RESV_USAGE_WRITE, true,
+					       dma_resv_usage_rw(i == 1), true,
 					       GPU_TIMEOUT);
 		if (waited <= 0) {
 			ret = waited ? waited : -ETIMEDOUT;
@@ -1965,11 +2067,14 @@ static int n32h7xx_gpu_exec_blit(struct drm_device *drm, struct drm_file *file,
 	n32h7xx_gpu_emit_blit(gpu, &blit,
 			      to_drm_gem_dma_obj(objs[0])->dma_addr,
 			      to_drm_gem_dma_obj(objs[1])->dma_addr);
-	ret = n32h7xx_gpu_run(gpu);
+	ret = n32h7xx_gpu_run(gpu,
+		(u64)args->width * args->height < GPU_SPIN_MAX_PIXELS);
 	if (gpu->wedged) {
 		/* An unconfirmed reset must never return live DMA memory to a pool. */
-		drm_gem_object_get(objs[1]);
-		gpu->stuck = objs[1];
+		for (i = 0; i < ARRAY_SIZE(objs); i++) {
+			drm_gem_object_get(objs[i]);
+			gpu->stuck[i] = objs[i];
+		}
 	}
 	if (ret)
 		dma_fence_set_error(&fence->base, ret);
@@ -2029,6 +2134,8 @@ static const struct drm_ioctl_desc n32h7xx_gpu_ioctls[] = {
 	DRM_IOCTL_DEF_DRV(N32H7XX_POLY, n32h7xx_gpu_poly, DRM_RENDER_ALLOW),
 	DRM_IOCTL_DEF_DRV(N32H7XX_POLY_BATCH, n32h7xx_gpu_poly_batch,
 			  DRM_RENDER_ALLOW),
+	DRM_IOCTL_DEF_DRV(N32H7XX_POLY_CLIP_BATCH, n32h7xx_gpu_poly_clip_batch,
+			  DRM_RENDER_ALLOW),
 	DRM_IOCTL_DEF_DRV(N32H7XX_CURVE, n32h7xx_gpu_curve, DRM_RENDER_ALLOW),
 	DRM_IOCTL_DEF_DRV(N32H7XX_PROFILE, n32h7xx_gpu_profile,
 			  DRM_RENDER_ALLOW),
@@ -2071,13 +2178,13 @@ static int n32h7xx_gpu_probe(struct platform_device *pdev)
 		return PTR_ERR(gpu);
 	mutex_init(&gpu->lock);
 	mutex_init(&gpu->batch_lock);
-	gpu->batch_rects = devm_kcalloc(dev, DRM_N32H7XX_BATCH_MAX,
-					sizeof(*gpu->batch_rects), GFP_KERNEL);
-	gpu->batch_items = devm_kcalloc(dev, DRM_N32H7XX_BATCH_MAX,
-					sizeof(*gpu->batch_items), GFP_KERNEL);
-	gpu->batch_polys = devm_kcalloc(dev, DRM_N32H7XX_POLY_BATCH_MAX,
-					sizeof(*gpu->batch_polys), GFP_KERNEL);
-	gpu->batch_poly_items = devm_kcalloc(dev, DRM_N32H7XX_POLY_BATCH_MAX,
+	gpu->batch_rects = drmm_kcalloc(&gpu->drm, DRM_N32H7XX_BATCH_MAX,
+				       sizeof(*gpu->batch_rects), GFP_KERNEL);
+	gpu->batch_items = drmm_kcalloc(&gpu->drm, DRM_N32H7XX_BATCH_MAX,
+				       sizeof(*gpu->batch_items), GFP_KERNEL);
+	gpu->batch_polys = drmm_kcalloc(&gpu->drm, DRM_N32H7XX_POLY_BATCH_MAX,
+				       sizeof(*gpu->batch_polys), GFP_KERNEL);
+	gpu->batch_poly_items = drmm_kcalloc(&gpu->drm, DRM_N32H7XX_POLY_BATCH_MAX,
 					    sizeof(*gpu->batch_poly_items),
 					    GFP_KERNEL);
 	if (!gpu->batch_rects || !gpu->batch_items || !gpu->batch_polys ||
@@ -2116,7 +2223,8 @@ static int n32h7xx_gpu_probe(struct platform_device *pdev)
 	gpu->dump = dma_alloc_coherent(dev, PAGE_SIZE, &gpu->dump_dma,
 				       GFP_KERNEL);
 	if (!gpu->dump) {
-		dma_free_coherent(dev, PAGE_SIZE, gpu->stream, gpu->stream_dma);
+		dma_free_coherent(dev, GPU_STREAM_SIZE, gpu->stream,
+				  gpu->stream_dma);
 		gpu->stream = NULL;
 		return -ENOMEM;
 	}
@@ -2143,12 +2251,17 @@ static int n32h7xx_gpu_probe(struct platform_device *pdev)
 static void n32h7xx_gpu_remove(struct platform_device *pdev)
 {
 	struct n32h7xx_gpu *gpu = platform_get_drvdata(pdev);
+	unsigned int i;
 
 	drm_dev_unplug(&gpu->drm);
 	writel(0, gpu->regs + GPU_CONTROL);
-	if (!reset_control_assert(gpu->reset) && gpu->stuck) {
-		drm_gem_object_put(gpu->stuck);
-		gpu->stuck = NULL;
+	if (!reset_control_assert(gpu->reset)) {
+		for (i = 0; i < ARRAY_SIZE(gpu->stuck); i++) {
+			if (gpu->stuck[i]) {
+				drm_gem_object_put(gpu->stuck[i]);
+				gpu->stuck[i] = NULL;
+			}
+		}
 	}
 }
 

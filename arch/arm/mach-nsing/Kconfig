@@ -20,7 +20,8 @@ config SOC_N32H7XX
 	  Support for the NSING N32H7xx family.  N32H787 is the first
 	  supported member and combines a Cortex-M7 with a Cortex-M4.
 	  Linux runs on the Cortex-M7 and uses external SDRAM for memory.
-	  The Cortex-M4 is not managed by this platform support.
+	  The Cortex-M4 remains reset-held by default and can optionally be
+	  managed by N32H7XX_CM4_RPROC.
 
 config ARMV7M_SYSTICK_CLOCKEVENT
 	bool
@@ -39,5 +40,17 @@ config SERIAL_N32H7XX
 	  mach-nsing because the register block is SoC-private and is not a
 	  generic 8250/PL011-compatible UART.
 	  It provides the serial console and early boot console on USART1.
+
+config N32H7XX_CM4_RPROC
+	bool "NSING N32H7xx Cortex-M4 remoteproc support"
+	select REMOTEPROC
+	select REMOTEPROC_CDEV
+	help
+	  Manage the N32H7xx Cortex-M4 from Linux through the remoteproc
+	  framework.  Firmware is loaded into the CM4 AHB SRAM window and
+	  started only after userspace explicitly requests it.
+
+	  The bootloader must leave the CM4 in reset.  This driver refuses to
+	  take ownership of a CM4 that another boot stage has already released.
 
 endif

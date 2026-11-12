@@ -1,0 +1,61 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/remoteproc/nsing,n32h787-cm4.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: NSING N32H787 Cortex-M4 remote processor
+
+maintainers:
+  - Tobby Tan <tan.bo@nsingtech.com>
+
+description: |
+  The N32H787 Cortex-M4 boots from a vector table in its AHB SRAM. Linux
+  controls reset release through the SoC reset controller and loads ELF
+  segments only into the address ranges declared by this node.
+
+properties:
+  compatible:
+    const: nsing,n32h787-cm4
+
+  reg:
+    maxItems: 1
+
+  reg-names:
+    const: boot-vector
+
+  nsing,rcc:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: Reset and clock controller containing the CM4 reset release bit.
+
+  nsing,load-regions:
+    $ref: /schemas/types.yaml#/definitions/uint32-matrix
+    description: |
+      Address and size pairs describing the CM4 AHB SRAM ranges into which
+      firmware PT_LOAD segments may be loaded.
+    minItems: 1
+    items:
+      items:
+        - description: Start address of an allowed CM4 load region
+        - description: Size of the load region in bytes
+
+  nsing,heartbeat-address:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: |
+      Optional address of a writable 32-bit value that userspace can inspect
+      through the remoteproc device heartbeat attribute.
+
+  firmware-name:
+    maxItems: 1
+    description:
+      Optional firmware file initially assigned to the remote processor.
+      When omitted, no firmware is preselected and userspace must set one
+      through the remoteproc sysfs interface before starting the CM4.
+
+required:
+  - compatible
+  - reg
+  - reg-names
+  - nsing,rcc
+  - nsing,load-regions
+additionalProperties: false

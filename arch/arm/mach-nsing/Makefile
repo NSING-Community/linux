@@ -11,3 +11,4 @@ obj-y += n32h7xx-jpeg.o
 obj-y += n32h7xx-rtc.o
 obj-y += n32h7xx-ucid.o
 obj-$(CONFIG_SERIAL_N32H7XX) += n32h7xx-usart.o
+obj-$(CONFIG_N32H7XX_CM4_RPROC) += n32h7xx-cm4-rproc.o

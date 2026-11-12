@@ -354,6 +354,21 @@
 		};
 
 		/*
+		 * Linux owns the CM4 lifecycle.  The boot vector register selects
+		 * the vector table used after M4RSTREL is released.  Firmware is
+		 * loaded only into the listed AHB SRAM ranges; this node remains
+		 * disabled until a board enables it.  No firmware is preselected.
+		 */
+		cm4: remoteproc@511050ac {
+			compatible = "nsing,n32h787-cm4";
+			reg = <0x511050ac 0x4>;
+			reg-names = "boot-vector";
+			nsing,rcc = <&rcc>;
+			nsing,load-regions = <0x30000000 0x00058000>;
+			status = "disabled";
+		};
+
+		/*
 		 * SDMMC1 is a standard SDHCI host with an NSING wrapper in
 		 * front of it.  The wrapper holds the NSING-specific block
 		 * length, clock and tuning capability registers.

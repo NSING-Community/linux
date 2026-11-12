@@ -240,6 +240,10 @@ CONFIG_VIDEO_OV5640=y
 CONFIG_VIDEO_N32H7XX_JPEG=y
 CONFIG_VIDEO_N32H7XX_DVP=y
 
+# Optional CM4 remoteproc driver. The DT node remains disabled unless the
+# board DTS or a release overlay explicitly enables it.
+CONFIG_N32H7XX_CM4_RPROC=y
+
 # --- parallel LCD and 2D GPU -------------------------------------------------
 CONFIG_DRM=y
 CONFIG_DRM_N32H7XX_LCDC=y

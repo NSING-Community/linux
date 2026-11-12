@@ -4,6 +4,6 @@
 /plugin/;
 
 &cm4 {
-	nsing,heartbeat-address = <0x30000100>;
+	nsing,heartbeat-address = <0x30000320>;
 	status = "okay";
 };

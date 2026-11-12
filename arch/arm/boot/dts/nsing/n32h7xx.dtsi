@@ -361,8 +361,10 @@
 		 */
 		cm4: remoteproc@511050ac {
 			compatible = "nsing,n32h787-cm4";
-			reg = <0x511050ac 0x4>;
-			reg-names = "boot-vector";
+			reg = <0x511050ac 0x4>,
+			      <0x400f7000 0x28>;
+			reg-names = "boot-vector", "dcmu";
+			interrupts = <177>;
 			nsing,rcc = <&rcc>;
 			nsing,load-regions = <0x30000000 0x00058000>;
 			status = "disabled";

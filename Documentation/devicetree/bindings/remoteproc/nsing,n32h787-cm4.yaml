@@ -12,17 +12,26 @@ maintainers:
 description: |
   The N32H787 Cortex-M4 boots from a vector table in its AHB SRAM. Linux
   controls reset release through the SoC reset controller and loads ELF
-  segments only into the address ranges declared by this node.
+  segments only into the address ranges declared by this node. Exception
+  fetches use the AHB SRAM base, so firmware must place its vector table at
+  0x30000000.
 
 properties:
   compatible:
     const: nsing,n32h787-cm4
 
   reg:
-    maxItems: 1
+    minItems: 2
+    maxItems: 2
 
   reg-names:
-    const: boot-vector
+    items:
+      - const: boot-vector
+      - const: dcmu
+
+  interrupts:
+    maxItems: 1
+    description: DCMU receive-message interrupt shared by the CM7 and CM4.
 
   nsing,rcc:
     $ref: /schemas/types.yaml#/definitions/phandle
@@ -56,6 +65,7 @@ required:
   - compatible
   - reg
   - reg-names
+  - interrupts
   - nsing,rcc
   - nsing,load-regions
 additionalProperties: false

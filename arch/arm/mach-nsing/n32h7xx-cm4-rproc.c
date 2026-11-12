@@ -2,34 +2,56 @@
 /*
  * N32H7xx Cortex-M4 remoteproc.
  *
- * The CM4 hardware starts from a vector table, unlike Cortex-A Linux images
- * whose ELF entry point is the reset address.  The ELF loader therefore uses
- * p_paddr for all PT_LOAD segments, while get_boot_addr() returns the lowest
- * loaded address as the CM4 vector-table base.
+ * The CM4 hardware starts from its AHB SRAM vector table, unlike Cortex-A
+ * Linux images whose ELF entry point is the reset address.  The ELF loader
+ * therefore uses p_paddr for all PT_LOAD segments.  Exception fetches use the
+ * SRAM base as well, so the vector table must start at N32H7XX_CM4_SRAM_START.
  */
 
 #include <linux/elf.h>
 #include <linux/firmware.h>
+#include <linux/fs.h>
+#include <linux/interrupt.h>
 #include <linux/io.h>
+#include <linux/miscdevice.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/platform_device.h>
+#include <linux/poll.h>
 #include <linux/remoteproc.h>
 #include <linux/slab.h>
+#include <linux/spinlock.h>
 #include <linux/string.h>
 #include <linux/sysfs.h>
+#include <linux/uaccess.h>
+#include <linux/wait.h>
 
 #include <asm/cacheflush.h>
 
 #define N32H7XX_CM4_SRAM_START		0x30000000U
 #define N32H7XX_CM4_SRAM_END		0x30058000U
+#define N32H7XX_CM4_VECTOR_BASE		N32H7XX_CM4_SRAM_START
 #define N32H7XX_CM4_VECTOR_ALIGN	128U
 #define N32H7XX_CM4_CORE_VECTOR_SIZE	(16 * sizeof(u32))
 #define N32H7XX_CM4_MAX_SEGMENTS	16U
 
 #define N32H7XX_RCC_M4RSTREL		0x174U
 #define N32H7XX_RCC_M4RSTREL_EN		BIT(0)
+#define N32H7XX_RCC_CFG4		0x168U
+#define N32H7XX_RCC_CFG4_DCMU_M7_EN	BIT(5)
+#define N32H7XX_RCC_CFG4_DCMU_M4_EN	BIT(4)
+
+#define N32H7XX_DCMU_TXMSG0		0x00U
+#define N32H7XX_DCMU_RCVMSG0		0x10U
+#define N32H7XX_DCMU_STS		0x20U
+#define N32H7XX_DCMU_CTRL		0x24U
+#define N32H7XX_DCMU_STS_TEF0		BIT(23)
+#define N32H7XX_DCMU_STS_RFF0		BIT(27)
+#define N32H7XX_DCMU_STS_GPIF0		BIT(31)
+#define N32H7XX_DCMU_CTRL_RFIE0		BIT(27)
+#define N32H7XX_DCMU_MESSAGE_SIZE	sizeof(u32)
 
 struct n32h7xx_cm4_region {
 	u32 start;
@@ -44,10 +66,19 @@ struct n32h7xx_cm4_loaded_segment {
 struct n32h7xx_cm4 {
 	struct rproc *rproc;
 	void __iomem *boot_vector;
+	void __iomem *dcmu;
 	void __iomem *rcc;
 	struct n32h7xx_cm4_region *regions;
 	struct n32h7xx_cm4_loaded_segment loaded_segments[N32H7XX_CM4_MAX_SEGMENTS];
 	u32 *heartbeat;
+	struct miscdevice msg_misc;
+	struct mutex msg_lock;
+	wait_queue_head_t msg_wait;
+	spinlock_t msg_rx_lock;
+	u32 msg_rx_value;
+	u32 msg_rx_seq;
+	bool msg_rx_pending;
+	bool running;
 	unsigned int num_regions;
 	unsigned int num_loaded_segments;
 };
@@ -234,6 +265,12 @@ static u64 n32h7xx_cm4_get_boot_addr(struct rproc *rproc,
 			vector_base, N32H7XX_CM4_VECTOR_ALIGN);
 		return 0;
 	}
+	if (vector_base != N32H7XX_CM4_VECTOR_BASE) {
+		dev_err(&rproc->dev,
+			"vector table 0x%x must start at CM4 SRAM base 0x%x\n",
+			vector_base, N32H7XX_CM4_VECTOR_BASE);
+		return 0;
+	}
 
 	return vector_base;
 }
@@ -333,6 +370,12 @@ static int n32h7xx_cm4_sanity_check(struct rproc *rproc,
 			vector_base, N32H7XX_CM4_VECTOR_ALIGN);
 		return -EINVAL;
 	}
+	if (vector_base != N32H7XX_CM4_VECTOR_BASE) {
+		dev_err(&rproc->dev,
+			"vector table 0x%x must start at CM4 SRAM base 0x%x\n",
+			vector_base, N32H7XX_CM4_VECTOR_BASE);
+		return -EINVAL;
+	}
 
 	memcpy(&initial_sp, fw->data + vector_phdr->p_offset, sizeof(initial_sp));
 	memcpy(&reset_vector, fw->data + vector_phdr->p_offset + sizeof(u32),
@@ -425,6 +468,221 @@ static int n32h7xx_cm4_load_segments(struct rproc *rproc,
 	return 0;
 }
 
+static int n32h7xx_cm4_dcmu_enable_clocks(struct n32h7xx_cm4 *priv)
+{
+	u32 expected = N32H7XX_RCC_CFG4_DCMU_M7_EN |
+		       N32H7XX_RCC_CFG4_DCMU_M4_EN;
+	u32 value;
+
+	value = readl(priv->rcc + N32H7XX_RCC_CFG4);
+	writel(value | expected, priv->rcc + N32H7XX_RCC_CFG4);
+	value = readl(priv->rcc + N32H7XX_RCC_CFG4);
+	if ((value & expected) != expected) {
+		dev_err(&priv->rproc->dev, "failed to enable DCMU clocks\n");
+		return -EIO;
+	}
+
+	return 0;
+}
+
+static void n32h7xx_cm4_dcmu_clear_pending(struct n32h7xx_cm4 *priv)
+{
+	/* Match the vendor flow: clear the notification, then consume MSG0. */
+	writel(N32H7XX_DCMU_STS_GPIF0, priv->dcmu + N32H7XX_DCMU_STS);
+	readl(priv->dcmu + N32H7XX_DCMU_RCVMSG0);
+}
+
+static int n32h7xx_cm4_dcmu_start(struct n32h7xx_cm4 *priv)
+{
+	u32 value;
+	int ret;
+
+	mutex_lock(&priv->msg_lock);
+	if (priv->running) {
+		ret = -EBUSY;
+		goto out_unlock;
+	}
+
+	ret = n32h7xx_cm4_dcmu_enable_clocks(priv);
+	if (ret)
+		goto out_unlock;
+
+	n32h7xx_cm4_dcmu_clear_pending(priv);
+	value = readl(priv->dcmu + N32H7XX_DCMU_CTRL);
+	writel(value | N32H7XX_DCMU_CTRL_RFIE0,
+	       priv->dcmu + N32H7XX_DCMU_CTRL);
+	WRITE_ONCE(priv->running, true);
+
+out_unlock:
+	mutex_unlock(&priv->msg_lock);
+	return ret;
+}
+
+static void n32h7xx_cm4_dcmu_stop(struct n32h7xx_cm4 *priv)
+{
+	unsigned long flags;
+	u32 value;
+
+	mutex_lock(&priv->msg_lock);
+	WRITE_ONCE(priv->running, false);
+	value = readl(priv->dcmu + N32H7XX_DCMU_CTRL);
+	writel(value & ~N32H7XX_DCMU_CTRL_RFIE0,
+	       priv->dcmu + N32H7XX_DCMU_CTRL);
+	mutex_unlock(&priv->msg_lock);
+
+	spin_lock_irqsave(&priv->msg_rx_lock, flags);
+	priv->msg_rx_pending = false;
+	priv->msg_rx_seq++;
+	spin_unlock_irqrestore(&priv->msg_rx_lock, flags);
+	wake_up_interruptible_all(&priv->msg_wait);
+}
+
+static irqreturn_t n32h7xx_cm4_dcmu_irq(int irq, void *data)
+{
+	struct n32h7xx_cm4 *priv = data;
+	unsigned long flags;
+	u32 status;
+	u32 message;
+
+	status = readl(priv->dcmu + N32H7XX_DCMU_STS);
+	if (!(status & (N32H7XX_DCMU_STS_RFF0 | N32H7XX_DCMU_STS_GPIF0)))
+		return IRQ_NONE;
+
+	if (status & N32H7XX_DCMU_STS_GPIF0)
+		writel(N32H7XX_DCMU_STS_GPIF0,
+		       priv->dcmu + N32H7XX_DCMU_STS);
+	if (!(status & N32H7XX_DCMU_STS_RFF0))
+		return IRQ_HANDLED;
+
+	message = readl(priv->dcmu + N32H7XX_DCMU_RCVMSG0);
+	if (!READ_ONCE(priv->running))
+		return IRQ_HANDLED;
+
+	spin_lock_irqsave(&priv->msg_rx_lock, flags);
+	if (priv->msg_rx_pending)
+		dev_warn_ratelimited(&priv->rproc->dev,
+				     "CM4 message overwrote an unread message\n");
+	priv->msg_rx_value = message;
+	priv->msg_rx_seq++;
+	priv->msg_rx_pending = true;
+	spin_unlock_irqrestore(&priv->msg_rx_lock, flags);
+	wake_up_interruptible(&priv->msg_wait);
+
+	return IRQ_HANDLED;
+}
+
+static int n32h7xx_cm4_msg_open(struct inode *inode, struct file *file)
+{
+	struct miscdevice *misc = file->private_data;
+
+	file->private_data = container_of(misc, struct n32h7xx_cm4, msg_misc);
+	return 0;
+}
+
+static ssize_t n32h7xx_cm4_msg_read(struct file *file, char __user *buf,
+				    size_t count, loff_t *ppos)
+{
+	struct n32h7xx_cm4 *priv = file->private_data;
+	unsigned long flags;
+	u32 message;
+	int ret;
+
+	if (count < N32H7XX_DCMU_MESSAGE_SIZE)
+		return -EINVAL;
+
+	if (file->f_flags & O_NONBLOCK) {
+		if (!READ_ONCE(priv->running))
+			return -ENODEV;
+		if (!READ_ONCE(priv->msg_rx_pending))
+			return -EAGAIN;
+	} else {
+		ret = wait_event_interruptible(priv->msg_wait,
+				!READ_ONCE(priv->running) ||
+				READ_ONCE(priv->msg_rx_pending));
+		if (ret)
+			return ret;
+		if (!READ_ONCE(priv->running))
+			return -ENODEV;
+	}
+
+	spin_lock_irqsave(&priv->msg_rx_lock, flags);
+	if (!priv->msg_rx_pending) {
+		spin_unlock_irqrestore(&priv->msg_rx_lock, flags);
+		return -EAGAIN;
+	}
+	message = priv->msg_rx_value;
+	priv->msg_rx_pending = false;
+	spin_unlock_irqrestore(&priv->msg_rx_lock, flags);
+
+	if (copy_to_user(buf, &message, sizeof(message)))
+		return -EFAULT;
+
+	return sizeof(message);
+}
+
+static ssize_t n32h7xx_cm4_msg_write(struct file *file,
+				     const char __user *buf, size_t count,
+				     loff_t *ppos)
+{
+	struct n32h7xx_cm4 *priv = file->private_data;
+	u32 message;
+	u32 status;
+	int ret = sizeof(message);
+
+	if (count != N32H7XX_DCMU_MESSAGE_SIZE)
+		return -EINVAL;
+	if (copy_from_user(&message, buf, sizeof(message)))
+		return -EFAULT;
+
+	mutex_lock(&priv->msg_lock);
+	if (!priv->running) {
+		ret = -ENODEV;
+		goto out_unlock;
+	}
+
+	status = readl(priv->dcmu + N32H7XX_DCMU_STS);
+	if (!(status & N32H7XX_DCMU_STS_TEF0)) {
+		ret = -EBUSY;
+		goto out_unlock;
+	}
+
+	writel(message, priv->dcmu + N32H7XX_DCMU_TXMSG0);
+
+out_unlock:
+	mutex_unlock(&priv->msg_lock);
+	return ret;
+}
+
+static __poll_t n32h7xx_cm4_msg_poll(struct file *file, poll_table *wait)
+{
+	struct n32h7xx_cm4 *priv = file->private_data;
+	unsigned long flags;
+	__poll_t events = 0;
+
+	poll_wait(file, &priv->msg_wait, wait);
+
+	spin_lock_irqsave(&priv->msg_rx_lock, flags);
+	if (READ_ONCE(priv->running)) {
+		if (priv->msg_rx_pending)
+			events |= EPOLLIN | EPOLLRDNORM;
+		events |= EPOLLOUT | EPOLLWRNORM;
+	} else {
+		events |= EPOLLERR | EPOLLHUP;
+	}
+	spin_unlock_irqrestore(&priv->msg_rx_lock, flags);
+
+	return events;
+}
+
+static const struct file_operations n32h7xx_cm4_msg_fops = {
+	.owner = THIS_MODULE,
+	.open = n32h7xx_cm4_msg_open,
+	.read = n32h7xx_cm4_msg_read,
+	.write = n32h7xx_cm4_msg_write,
+	.poll = n32h7xx_cm4_msg_poll,
+	.llseek = noop_llseek,
+};
+
 static int n32h7xx_cm4_prepare(struct rproc *rproc)
 {
 	struct n32h7xx_cm4 *priv = rproc->priv;
@@ -456,6 +714,7 @@ static int n32h7xx_cm4_start(struct rproc *rproc)
 	u32 reset_vector;
 	u32 value;
 	unsigned int i;
+	int ret;
 
 	if (!priv->num_loaded_segments)
 		return -EINVAL;
@@ -489,11 +748,16 @@ static int n32h7xx_cm4_start(struct rproc *rproc)
 	writel(rproc->bootaddr, priv->boot_vector);
 	readl(priv->boot_vector);
 
+	ret = n32h7xx_cm4_dcmu_start(priv);
+	if (ret)
+		return ret;
+
 	value = readl(priv->rcc + N32H7XX_RCC_M4RSTREL);
 	writel(value | N32H7XX_RCC_M4RSTREL_EN,
 	       priv->rcc + N32H7XX_RCC_M4RSTREL);
 	value = readl(priv->rcc + N32H7XX_RCC_M4RSTREL);
 	if (!(value & N32H7XX_RCC_M4RSTREL_EN)) {
+		n32h7xx_cm4_dcmu_stop(priv);
 		dev_err(&rproc->dev, "failed to release CM4 from reset\n");
 		return -EIO;
 	}
@@ -508,6 +772,7 @@ static int n32h7xx_cm4_stop(struct rproc *rproc)
 	struct n32h7xx_cm4 *priv = rproc->priv;
 	u32 value;
 
+	n32h7xx_cm4_dcmu_stop(priv);
 	value = readl(priv->rcc + N32H7XX_RCC_M4RSTREL);
 	writel(value & ~N32H7XX_RCC_M4RSTREL_EN,
 	       priv->rcc + N32H7XX_RCC_M4RSTREL);
@@ -544,6 +809,11 @@ static void n32h7xx_cm4_remove_heartbeat(void *data)
 	device_remove_file(data, &dev_attr_heartbeat);
 }
 
+static void n32h7xx_cm4_unregister_misc(void *data)
+{
+	misc_deregister(data);
+}
+
 static const struct rproc_ops n32h7xx_cm4_rproc_ops = {
 	.prepare = n32h7xx_cm4_prepare,
 	.unprepare = n32h7xx_cm4_unprepare,
@@ -564,6 +834,7 @@ static int n32h7xx_cm4_probe(struct platform_device *pdev)
 	struct rproc *rproc;
 	const char *firmware_name;
 	u32 heartbeat_addr;
+	int irq;
 	int ret;
 
 	rproc = devm_rproc_alloc(dev, "n32h787-cm4", &n32h7xx_cm4_rproc_ops,
@@ -573,6 +844,9 @@ static int n32h7xx_cm4_probe(struct platform_device *pdev)
 
 	priv = rproc->priv;
 	priv->rproc = rproc;
+	mutex_init(&priv->msg_lock);
+	spin_lock_init(&priv->msg_rx_lock);
+	init_waitqueue_head(&priv->msg_wait);
 	rproc->auto_boot = false;
 
 	ret = of_property_read_string(np, "firmware-name", &firmware_name);
@@ -592,6 +866,18 @@ static int n32h7xx_cm4_probe(struct platform_device *pdev)
 		devm_platform_ioremap_resource_byname(pdev, "boot-vector");
 	if (IS_ERR(priv->boot_vector))
 		return PTR_ERR(priv->boot_vector);
+
+	priv->dcmu = devm_platform_ioremap_resource_byname(pdev, "dcmu");
+	if (IS_ERR(priv->dcmu))
+		return PTR_ERR(priv->dcmu);
+
+	irq = platform_get_irq(pdev, 0);
+	if (irq < 0)
+		return irq;
+	ret = devm_request_irq(dev, irq, n32h7xx_cm4_dcmu_irq, 0,
+			       "n32h787-cm4-dcmu", priv);
+	if (ret)
+		return dev_err_probe(dev, ret, "failed to request DCMU IRQ\n");
 
 	rcc_np = of_parse_phandle(np, "nsing,rcc", 0);
 	if (!rcc_np)
@@ -622,6 +908,22 @@ static int n32h7xx_cm4_probe(struct platform_device *pdev)
 	}
 
 	ret = devm_rproc_add(dev, rproc);
+	if (ret)
+		return ret;
+
+	priv->msg_misc = (struct miscdevice) {
+		.minor = MISC_DYNAMIC_MINOR,
+		.name = "cm4-msg0",
+		.fops = &n32h7xx_cm4_msg_fops,
+		.parent = dev,
+		.mode = 0600,
+	};
+	ret = misc_register(&priv->msg_misc);
+	if (ret)
+		return dev_err_probe(dev, ret,
+				     "failed to register CM4 message device\n");
+	ret = devm_add_action_or_reset(dev, n32h7xx_cm4_unregister_misc,
+				       &priv->msg_misc);
 	if (ret)
 		return ret;
 

@@ -45,6 +45,7 @@ config N32H7XX_CM4_RPROC
 	bool "NSING N32H7xx Cortex-M4 remoteproc support"
 	select REMOTEPROC
 	select REMOTEPROC_CDEV
+	select CRC32
 	help
 	  Manage the N32H7xx Cortex-M4 from Linux through the remoteproc
 	  framework.  Firmware is loaded into the CM4 AHB SRAM window and

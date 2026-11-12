@@ -16,6 +16,19 @@ typedef uint32_t n32h787_cm4_u32;
 #define N32H787_CM4_ABI_MAGIC		0x4e333243U /* "N32C" */
 #define N32H787_CM4_ABI_VERSION		2U
 
+#define N32H787_CM4_IMAGE_MAGIC		0x4d32334eU /* "N32M" */
+#define N32H787_CM4_IMAGE_META_VERSION	1U
+#define N32H787_CM4_IMAGE_NAME_SIZE	16U
+
+#define N32H787_CM4_IMAGE_FLAG_HARD_FLOAT	0x00000001U
+#define N32H787_CM4_IMAGE_FLAG_SUPPORTED	\
+	N32H787_CM4_IMAGE_FLAG_HARD_FLOAT
+
+#define N32H787_CM4_CAP_DCMU		0x00000001U
+#define N32H787_CM4_CAP_AUDIO_STREAM	0x00000002U
+#define N32H787_CM4_CAP_SUPPORTED	\
+	(N32H787_CM4_CAP_DCMU | N32H787_CM4_CAP_AUDIO_STREAM)
+
 #define N32H787_CM4_SRAM_BASE		0x30000000U
 #define N32H787_CM4_VECTOR_BASE		0x30000000U
 
@@ -76,6 +89,24 @@ struct n32h787_cm4_message {
 	n32h787_cm4_u16 payload_len;
 	n32h787_cm4_u16 reserved;
 	n32h787_cm4_u8 payload[N32H787_CM4_MESSAGE_PAYLOAD];
+};
+
+/* Stored verbatim in one PT_NOTE segment named .n32cm4. */
+struct n32h787_cm4_image_meta {
+	n32h787_cm4_u32 magic;
+	n32h787_cm4_u16 version;
+	n32h787_cm4_u16 size;
+	char name[N32H787_CM4_IMAGE_NAME_SIZE];
+	n32h787_cm4_u32 abi_version;
+	n32h787_cm4_u32 task_version;
+	n32h787_cm4_u32 flags;
+	n32h787_cm4_u32 entry;
+	n32h787_cm4_u32 initial_sp;
+	n32h787_cm4_u32 image_bytes;
+	n32h787_cm4_u32 mem_bytes;
+	n32h787_cm4_u32 segment_count;
+	n32h787_cm4_u32 capabilities;
+	n32h787_cm4_u32 load_crc32;
 };
 
 #endif /* __LINUX_SOC_NSING_N32H787_CM4_H */

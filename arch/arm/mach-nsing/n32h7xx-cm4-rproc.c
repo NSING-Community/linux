@@ -9,6 +9,7 @@
  */
 
 #include <linux/elf.h>
+#include <linux/crc32.h>
 #include <linux/firmware.h>
 #include <linux/fs.h>
 #include <linux/interrupt.h>
@@ -39,6 +40,7 @@
 #define N32H7XX_CM4_VECTOR_ALIGN	128U
 #define N32H7XX_CM4_CORE_VECTOR_SIZE	(16 * sizeof(u32))
 #define N32H7XX_CM4_MAX_SEGMENTS	16U
+#define N32H7XX_EF_ARM_ABI_FLOAT_HARD	0x400U
 
 #define N32H7XX_RCC_M4RSTREL		0x174U
 #define N32H7XX_RCC_M4RSTREL_EN		BIT(0)
@@ -94,6 +96,7 @@ struct n32h7xx_cm4 {
 static_assert(sizeof(struct n32h787_cm4_control) == 32);
 static_assert(sizeof(struct n32h787_cm4_message) ==
 	      N32H787_CM4_MESSAGE_SIZE);
+static_assert(sizeof(struct n32h787_cm4_image_meta) == 64);
 
 static void n32h7xx_cm4_iounmap(void *data)
 {
@@ -258,6 +261,146 @@ static bool n32h7xx_cm4_is_writable(const struct elf32_hdr *ehdr, u32 addr)
 	return false;
 }
 
+static bool n32h7xx_cm4_meta_name_valid(const char *name)
+{
+	unsigned int i;
+
+	for (i = 0; i < N32H787_CM4_IMAGE_NAME_SIZE; i++) {
+		char c = name[i];
+
+		if (!c)
+			return i > 0;
+		if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+		      (c >= '0' && c <= '9') || c == '.' || c == '_' ||
+		      c == '-'))
+			return false;
+	}
+
+	return false;
+}
+
+static int n32h7xx_cm4_validate_image_meta(struct rproc *rproc,
+					   const struct elf32_hdr *ehdr,
+					   const struct firmware *fw,
+					   u32 entry, u32 initial_sp)
+{
+	const struct n32h787_cm4_image_meta *found = NULL;
+	struct n32h787_cm4_image_meta meta;
+	const struct elf32_phdr *phdrs;
+	unsigned int load_count = 0;
+	unsigned int note_count = 0;
+	u64 image_bytes = 0;
+	u64 mem_bytes = 0;
+	u32 crc = ~0U;
+	u32 expected_crc;
+	unsigned int i;
+
+	phdrs = (const struct elf32_phdr *)(fw->data + ehdr->e_phoff);
+	for (i = 0; i < ehdr->e_phnum; i++) {
+		const struct elf32_phdr *phdr = &phdrs[i];
+
+		if (phdr->p_type == PT_NOTE) {
+			note_count++;
+			if (phdr->p_filesz != sizeof(meta) ||
+			    (phdr->p_memsz && phdr->p_memsz != sizeof(meta)) ||
+			    phdr->p_offset > fw->size ||
+			    phdr->p_filesz > fw->size - phdr->p_offset)
+				continue;
+			found = (const void *)(fw->data + phdr->p_offset);
+			continue;
+		}
+		if (phdr->p_type != PT_LOAD)
+			continue;
+		load_count++;
+		image_bytes += phdr->p_filesz;
+		mem_bytes += phdr->p_memsz;
+	}
+
+	if (note_count != 1 || !found) {
+		dev_err(&rproc->dev,
+			"expected one valid .n32cm4 PT_NOTE metadata segment\n");
+		return -EINVAL;
+	}
+	if (image_bytes > U32_MAX || mem_bytes > U32_MAX) {
+		dev_err(&rproc->dev, "CM4 image or memory budget exceeds 32 bits\n");
+		return -EINVAL;
+	}
+
+	memcpy(&meta, found, sizeof(meta));
+	if (meta.magic != N32H787_CM4_IMAGE_MAGIC ||
+	    meta.version != N32H787_CM4_IMAGE_META_VERSION ||
+	    meta.size != sizeof(meta)) {
+		dev_err(&rproc->dev, "invalid .n32cm4 magic/version/size\n");
+		return -EINVAL;
+	}
+	if (!n32h7xx_cm4_meta_name_valid(meta.name)) {
+		dev_err(&rproc->dev, "invalid .n32cm4 task name\n");
+		return -EINVAL;
+	}
+	if (meta.abi_version != N32H787_CM4_ABI_VERSION ||
+	    !meta.task_version) {
+		dev_err(&rproc->dev, "unsupported .n32cm4 ABI or task version\n");
+		return -EINVAL;
+	}
+	if (meta.flags & ~N32H787_CM4_IMAGE_FLAG_SUPPORTED) {
+		dev_err(&rproc->dev, "unknown .n32cm4 flags 0x%08x\n",
+			meta.flags & ~N32H787_CM4_IMAGE_FLAG_SUPPORTED);
+		return -EINVAL;
+	}
+	if (!!(meta.flags & N32H787_CM4_IMAGE_FLAG_HARD_FLOAT) !=
+	    !!(ehdr->e_flags & N32H7XX_EF_ARM_ABI_FLOAT_HARD)) {
+		dev_err(&rproc->dev, ".n32cm4 float ABI does not match ELF\n");
+		return -EINVAL;
+	}
+	if (meta.entry != entry || meta.initial_sp != initial_sp) {
+		dev_err(&rproc->dev,
+			".n32cm4 entry or initial stack does not match vectors\n");
+		return -EINVAL;
+	}
+	if (meta.image_bytes != image_bytes ||
+	    meta.mem_bytes != mem_bytes ||
+	    meta.segment_count != load_count) {
+		dev_err(&rproc->dev,
+			".n32cm4 image/memory/segment budget mismatch\n");
+		return -EINVAL;
+	}
+	if (meta.capabilities & ~N32H787_CM4_CAP_SUPPORTED) {
+		dev_err(&rproc->dev, "unknown .n32cm4 capabilities 0x%08x\n",
+			meta.capabilities & ~N32H787_CM4_CAP_SUPPORTED);
+		return -EINVAL;
+	}
+
+	for (i = 0; i < ehdr->e_phnum; i++) {
+		const struct elf32_phdr *phdr = &phdrs[i];
+		size_t remaining;
+		static const u8 zeros[256];
+
+		if (phdr->p_type != PT_LOAD)
+			continue;
+		crc = crc32_le(crc, fw->data + phdr->p_offset, phdr->p_filesz);
+		remaining = phdr->p_memsz - phdr->p_filesz;
+		while (remaining) {
+			size_t chunk = min_t(size_t, remaining, sizeof(zeros));
+
+			crc = crc32_le(crc, zeros, chunk);
+			remaining -= chunk;
+		}
+	}
+	expected_crc = crc ^ ~0U;
+	if (meta.load_crc32 != expected_crc) {
+		dev_err(&rproc->dev,
+			".n32cm4 load CRC 0x%08x does not match 0x%08x\n",
+			meta.load_crc32, expected_crc);
+		return -EINVAL;
+	}
+
+	dev_info(&rproc->dev,
+		 "CM4 image %.16s v%u: image=%llu mem=%llu segments=%u caps=0x%x\n",
+		 meta.name, meta.task_version, image_bytes, mem_bytes,
+		 meta.segment_count, meta.capabilities);
+	return 0;
+}
+
 static u64 n32h7xx_cm4_get_boot_addr(struct rproc *rproc,
 				     const struct firmware *fw)
 {
@@ -416,6 +559,12 @@ static int n32h7xx_cm4_sanity_check(struct rproc *rproc,
 			ehdr->e_entry, reset_vector);
 		return -EINVAL;
 	}
+
+	ret = n32h7xx_cm4_validate_image_meta(rproc, ehdr, fw, ehdr->e_entry,
+					      initial_sp);
+	if (ret)
+		return ret;
+
 	if (priv->heartbeat &&
 	    !n32h7xx_cm4_is_writable(ehdr,
 				     (u32)(uintptr_t)priv->heartbeat) &&

@@ -13,6 +13,7 @@
 #include <linux/fs.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
+#include <linux/kernel.h>
 #include <linux/miscdevice.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
@@ -29,6 +30,8 @@
 #include <linux/wait.h>
 
 #include <asm/cacheflush.h>
+
+#include <linux/soc/nsing/n32h787-cm4.h>
 
 #define N32H7XX_CM4_SRAM_START		0x30000000U
 #define N32H7XX_CM4_SRAM_END		0x30058000U
@@ -52,6 +55,7 @@
 #define N32H7XX_DCMU_STS_GPIF0		BIT(31)
 #define N32H7XX_DCMU_CTRL_RFIE0		BIT(27)
 #define N32H7XX_DCMU_MESSAGE_SIZE	sizeof(u32)
+#define N32H7XX_CM4_RX_QUEUE_DEPTH	32U
 
 struct n32h7xx_cm4_region {
 	u32 start;
@@ -75,13 +79,21 @@ struct n32h7xx_cm4 {
 	struct mutex msg_lock;
 	wait_queue_head_t msg_wait;
 	spinlock_t msg_rx_lock;
-	u32 msg_rx_value;
+	struct n32h787_cm4_control *control;
+	struct n32h787_cm4_message rx_queue[N32H7XX_CM4_RX_QUEUE_DEPTH];
+	unsigned int rx_queue_head;
+	unsigned int rx_queue_tail;
+	u32 c2h_tail;
+	u32 msg_rx_dropped;
 	u32 msg_rx_seq;
-	bool msg_rx_pending;
 	bool running;
 	unsigned int num_regions;
 	unsigned int num_loaded_segments;
 };
+
+static_assert(sizeof(struct n32h787_cm4_control) == 32);
+static_assert(sizeof(struct n32h787_cm4_message) ==
+	      N32H787_CM4_MESSAGE_SIZE);
 
 static void n32h7xx_cm4_iounmap(void *data)
 {
@@ -333,6 +345,12 @@ static int n32h7xx_cm4_sanity_check(struct rproc *rproc,
 				i, phdr->p_paddr, phdr->p_memsz);
 			return -EINVAL;
 		}
+		if (phdr->p_paddr < N32H787_CM4_ABI_END &&
+		    N32H787_CM4_ABI_BASE < phdr->p_paddr + phdr->p_memsz) {
+			dev_err(&rproc->dev,
+				"PT_LOAD %u overlaps the CM4 platform ABI\n", i);
+			return -EINVAL;
+		}
 
 		da_end = (u64)phdr->p_paddr + phdr->p_memsz;
 		for (j = i + 1; j < ehdr->e_phnum; j++) {
@@ -400,7 +418,10 @@ static int n32h7xx_cm4_sanity_check(struct rproc *rproc,
 	}
 	if (priv->heartbeat &&
 	    !n32h7xx_cm4_is_writable(ehdr,
-				     (u32)(uintptr_t)priv->heartbeat)) {
+				     (u32)(uintptr_t)priv->heartbeat) &&
+	    !((u32)(uintptr_t)priv->heartbeat >= N32H787_CM4_ABI_BASE &&
+	      (u32)(uintptr_t)priv->heartbeat + sizeof(u32) <=
+			N32H787_CM4_ABI_END)) {
 		dev_err(&rproc->dev,
 			"heartbeat address is not in a writable PT_LOAD segment\n");
 		return -EINVAL;
@@ -492,6 +513,85 @@ static void n32h7xx_cm4_dcmu_clear_pending(struct n32h7xx_cm4 *priv)
 	readl(priv->dcmu + N32H7XX_DCMU_RCVMSG0);
 }
 
+static void n32h7xx_cm4_ipc_reset(struct n32h7xx_cm4 *priv)
+{
+	struct n32h787_cm4_control *control =
+		(struct n32h787_cm4_control *)(uintptr_t)N32H787_CM4_ABI_BASE;
+	unsigned long flags;
+
+	/* Discard stale cached lines before reinitializing the shared region. */
+	clean_dcache_area(control, N32H787_CM4_ABI_SIZE);
+	memset(control, 0, N32H787_CM4_ABI_SIZE);
+	priv->control = control;
+	WRITE_ONCE(priv->control->magic, N32H787_CM4_ABI_MAGIC);
+	WRITE_ONCE(priv->control->version, N32H787_CM4_ABI_VERSION);
+	WRITE_ONCE(priv->control->size, sizeof(*priv->control));
+	WRITE_ONCE(priv->control->state, N32H787_CM4_STATE_OFFLINE);
+	WRITE_ONCE(priv->c2h_tail, 0);
+	clean_dcache_area((void *)(uintptr_t)N32H787_CM4_ABI_BASE,
+			  N32H787_CM4_ABI_SIZE);
+
+	spin_lock_irqsave(&priv->msg_rx_lock, flags);
+	priv->rx_queue_head = 0;
+	priv->rx_queue_tail = 0;
+	priv->msg_rx_dropped = 0;
+	spin_unlock_irqrestore(&priv->msg_rx_lock, flags);
+}
+
+static void n32h7xx_cm4_drain_c2h(struct n32h7xx_cm4 *priv)
+{
+	struct n32h787_cm4_message *slots =
+		(struct n32h787_cm4_message *)(uintptr_t)N32H787_CM4_C2H_DATA;
+	volatile u32 *headp = (u32 *)(uintptr_t)N32H787_CM4_C2H_HEAD;
+	volatile u32 *tailp = (u32 *)(uintptr_t)N32H787_CM4_C2H_TAIL;
+	unsigned long flags;
+	u32 head;
+	u32 tail = priv->c2h_tail;
+	bool queued = false;
+
+	sync_cache_r((void *)headp);
+	head = READ_ONCE(*headp);
+	if (head - tail > N32H787_CM4_RING_SLOTS) {
+		priv->msg_rx_dropped += head - tail - N32H787_CM4_RING_SLOTS;
+		tail = head - N32H787_CM4_RING_SLOTS;
+	}
+
+	while (tail != head) {
+		struct n32h787_cm4_message *slot =
+			&slots[tail & N32H787_CM4_RING_MASK];
+		struct n32h787_cm4_message message;
+		unsigned int next;
+
+		sync_cache_r((void *)slot);
+		memcpy(&message, slot, sizeof(message));
+		if (message.payload_len > N32H787_CM4_MESSAGE_PAYLOAD) {
+			priv->msg_rx_dropped++;
+			tail++;
+			continue;
+		}
+
+		spin_lock_irqsave(&priv->msg_rx_lock, flags);
+		next = (priv->rx_queue_head + 1) % N32H7XX_CM4_RX_QUEUE_DEPTH;
+		if (next == priv->rx_queue_tail) {
+			priv->msg_rx_dropped++;
+			spin_unlock_irqrestore(&priv->msg_rx_lock, flags);
+		} else {
+			priv->rx_queue[priv->rx_queue_head] = message;
+			WRITE_ONCE(priv->rx_queue_head, next);
+			priv->msg_rx_seq++;
+			queued = true;
+			spin_unlock_irqrestore(&priv->msg_rx_lock, flags);
+		}
+		tail++;
+	}
+
+	WRITE_ONCE(priv->c2h_tail, tail);
+	WRITE_ONCE(*tailp, tail);
+	clean_dcache_area((void *)tailp, sizeof(*tailp));
+	if (queued)
+		wake_up_interruptible(&priv->msg_wait);
+}
+
 static int n32h7xx_cm4_dcmu_start(struct n32h7xx_cm4 *priv)
 {
 	u32 value;
@@ -531,7 +631,8 @@ static void n32h7xx_cm4_dcmu_stop(struct n32h7xx_cm4 *priv)
 	mutex_unlock(&priv->msg_lock);
 
 	spin_lock_irqsave(&priv->msg_rx_lock, flags);
-	priv->msg_rx_pending = false;
+	priv->rx_queue_head = 0;
+	priv->rx_queue_tail = 0;
 	priv->msg_rx_seq++;
 	spin_unlock_irqrestore(&priv->msg_rx_lock, flags);
 	wake_up_interruptible_all(&priv->msg_wait);
@@ -540,9 +641,7 @@ static void n32h7xx_cm4_dcmu_stop(struct n32h7xx_cm4 *priv)
 static irqreturn_t n32h7xx_cm4_dcmu_irq(int irq, void *data)
 {
 	struct n32h7xx_cm4 *priv = data;
-	unsigned long flags;
 	u32 status;
-	u32 message;
 
 	status = readl(priv->dcmu + N32H7XX_DCMU_STS);
 	if (!(status & (N32H7XX_DCMU_STS_RFF0 | N32H7XX_DCMU_STS_GPIF0)))
@@ -554,19 +653,11 @@ static irqreturn_t n32h7xx_cm4_dcmu_irq(int irq, void *data)
 	if (!(status & N32H7XX_DCMU_STS_RFF0))
 		return IRQ_HANDLED;
 
-	message = readl(priv->dcmu + N32H7XX_DCMU_RCVMSG0);
+	(void)readl(priv->dcmu + N32H7XX_DCMU_RCVMSG0);
 	if (!READ_ONCE(priv->running))
 		return IRQ_HANDLED;
 
-	spin_lock_irqsave(&priv->msg_rx_lock, flags);
-	if (priv->msg_rx_pending)
-		dev_warn_ratelimited(&priv->rproc->dev,
-				     "CM4 message overwrote an unread message\n");
-	priv->msg_rx_value = message;
-	priv->msg_rx_seq++;
-	priv->msg_rx_pending = true;
-	spin_unlock_irqrestore(&priv->msg_rx_lock, flags);
-	wake_up_interruptible(&priv->msg_wait);
+	n32h7xx_cm4_drain_c2h(priv);
 
 	return IRQ_HANDLED;
 }
@@ -583,22 +674,21 @@ static ssize_t n32h7xx_cm4_msg_read(struct file *file, char __user *buf,
 				    size_t count, loff_t *ppos)
 {
 	struct n32h7xx_cm4 *priv = file->private_data;
+	struct n32h787_cm4_message message;
 	unsigned long flags;
-	u32 message;
 	int ret;
-
-	if (count < N32H7XX_DCMU_MESSAGE_SIZE)
-		return -EINVAL;
 
 	if (file->f_flags & O_NONBLOCK) {
 		if (!READ_ONCE(priv->running))
 			return -ENODEV;
-		if (!READ_ONCE(priv->msg_rx_pending))
+		if (READ_ONCE(priv->rx_queue_head) ==
+		    READ_ONCE(priv->rx_queue_tail))
 			return -EAGAIN;
 	} else {
 		ret = wait_event_interruptible(priv->msg_wait,
 				!READ_ONCE(priv->running) ||
-				READ_ONCE(priv->msg_rx_pending));
+				READ_ONCE(priv->rx_queue_head) !=
+				READ_ONCE(priv->rx_queue_tail));
 		if (ret)
 			return ret;
 		if (!READ_ONCE(priv->running))
@@ -606,18 +696,23 @@ static ssize_t n32h7xx_cm4_msg_read(struct file *file, char __user *buf,
 	}
 
 	spin_lock_irqsave(&priv->msg_rx_lock, flags);
-	if (!priv->msg_rx_pending) {
+	if (priv->rx_queue_head == priv->rx_queue_tail) {
 		spin_unlock_irqrestore(&priv->msg_rx_lock, flags);
 		return -EAGAIN;
 	}
-	message = priv->msg_rx_value;
-	priv->msg_rx_pending = false;
+	message = priv->rx_queue[priv->rx_queue_tail];
+	if (count < message.payload_len) {
+		spin_unlock_irqrestore(&priv->msg_rx_lock, flags);
+		return -EMSGSIZE;
+	}
+	priv->rx_queue_tail = (priv->rx_queue_tail + 1) %
+			      N32H7XX_CM4_RX_QUEUE_DEPTH;
 	spin_unlock_irqrestore(&priv->msg_rx_lock, flags);
 
-	if (copy_to_user(buf, &message, sizeof(message)))
+	if (copy_to_user(buf, message.payload, message.payload_len))
 		return -EFAULT;
 
-	return sizeof(message);
+	return message.payload_len;
 }
 
 static ssize_t n32h7xx_cm4_msg_write(struct file *file,
@@ -625,18 +720,31 @@ static ssize_t n32h7xx_cm4_msg_write(struct file *file,
 				     loff_t *ppos)
 {
 	struct n32h7xx_cm4 *priv = file->private_data;
-	u32 message;
+	struct n32h787_cm4_message *slot;
+	volatile u32 *headp = (u32 *)(uintptr_t)N32H787_CM4_H2C_HEAD;
+	volatile u32 *tailp = (u32 *)(uintptr_t)N32H787_CM4_H2C_TAIL;
+	u8 payload[N32H787_CM4_MESSAGE_PAYLOAD];
+	u32 head;
+	u32 tail;
 	u32 status;
-	int ret = sizeof(message);
+	int ret = count;
 
-	if (count != N32H7XX_DCMU_MESSAGE_SIZE)
+	if (!count || count > N32H787_CM4_MESSAGE_PAYLOAD)
 		return -EINVAL;
-	if (copy_from_user(&message, buf, sizeof(message)))
+	if (copy_from_user(payload, buf, count))
 		return -EFAULT;
 
 	mutex_lock(&priv->msg_lock);
 	if (!priv->running) {
 		ret = -ENODEV;
+		goto out_unlock;
+	}
+
+	sync_cache_r((void *)tailp);
+	head = READ_ONCE(*headp);
+	tail = READ_ONCE(*tailp);
+	if (head - tail >= N32H787_CM4_RING_SLOTS) {
+		ret = -EAGAIN;
 		goto out_unlock;
 	}
 
@@ -646,7 +754,20 @@ static ssize_t n32h7xx_cm4_msg_write(struct file *file,
 		goto out_unlock;
 	}
 
-	writel(message, priv->dcmu + N32H7XX_DCMU_TXMSG0);
+	slot = (struct n32h787_cm4_message *)(uintptr_t)
+		(N32H787_CM4_H2C_DATA +
+		 (head & N32H787_CM4_RING_MASK) * sizeof(*slot));
+	memset(slot, 0, sizeof(*slot));
+	slot->sequence = head + 1;
+	slot->type = N32H787_CM4_MSG_USER;
+	slot->payload_len = count;
+	memcpy(slot->payload, payload, count);
+	clean_dcache_area(slot, sizeof(*slot));
+
+	WRITE_ONCE(*headp, head + 1);
+	clean_dcache_area((void *)headp, sizeof(*headp));
+	wmb();
+	writel(N32H787_CM4_DOORBELL, priv->dcmu + N32H7XX_DCMU_TXMSG0);
 
 out_unlock:
 	mutex_unlock(&priv->msg_lock);
@@ -663,7 +784,7 @@ static __poll_t n32h7xx_cm4_msg_poll(struct file *file, poll_table *wait)
 
 	spin_lock_irqsave(&priv->msg_rx_lock, flags);
 	if (READ_ONCE(priv->running)) {
-		if (priv->msg_rx_pending)
+		if (priv->rx_queue_head != priv->rx_queue_tail)
 			events |= EPOLLIN | EPOLLRDNORM;
 		events |= EPOLLOUT | EPOLLWRNORM;
 	} else {
@@ -718,6 +839,10 @@ static int n32h7xx_cm4_start(struct rproc *rproc)
 
 	if (!priv->num_loaded_segments)
 		return -EINVAL;
+
+	n32h7xx_cm4_ipc_reset(priv);
+	WRITE_ONCE(priv->control->state, N32H787_CM4_STATE_EARLY_BOOT);
+	clean_dcache_area(priv->control, sizeof(*priv->control));
 
 	/* Publish only data the ELF loader actually wrote for this image. */
 	for (i = 0; i < priv->num_loaded_segments; i++)
@@ -782,6 +907,11 @@ static int n32h7xx_cm4_stop(struct rproc *rproc)
 	if (value & N32H7XX_RCC_M4RSTREL_EN) {
 		dev_err(&rproc->dev, "failed to hold CM4 in reset\n");
 		return -EIO;
+	}
+
+	if (priv->control) {
+		WRITE_ONCE(priv->control->state, N32H787_CM4_STATE_OFFLINE);
+		clean_dcache_area(priv->control, sizeof(*priv->control));
 	}
 
 	return 0;
@@ -897,9 +1027,8 @@ static int n32h7xx_cm4_probe(struct platform_device *pdev)
 	ret = of_property_read_u32(np, "nsing,heartbeat-address",
 				   &heartbeat_addr);
 	if (!ret) {
-		if ((heartbeat_addr & (sizeof(u32) - 1)) ||
-		    !n32h7xx_cm4_region_contains(priv, heartbeat_addr,
-						 sizeof(u32)))
+		if (heartbeat_addr != N32H787_CM4_ABI_BASE +
+		    offsetof(struct n32h787_cm4_control, heartbeat))
 			return dev_err_probe(dev, -EINVAL,
 					     "invalid heartbeat address\n");
 		priv->heartbeat = (u32 *)(uintptr_t)heartbeat_addr;

@@ -20,18 +20,12 @@ srctree=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 #                 <STAGE_DIR>/modules; the top-level project passes that and
 #                 merges it into the rootfs SquashFS image.
 #
-#   CAMERA        1: apply the camera overlay and enable its reserved pool.
-#                 0 (default): leave the optional camera disabled.
-#
-#   LCD           1 (default): apply the display overlay and enable the
-#                 LCDC/GPU pool. 0: leave both disabled.
-#   CM4           1: apply the CM4 remoteproc overlay. The kernel must also
-#                 have CONFIG_N32H7XX_CM4_RPROC=y. 0 (default): leave the
-#                 remoteproc node disabled.
-#
-#   Optional devices are FDT overlays on <BOARD>.dtb.  This keeps the number of
-#   device-tree files linear as features are added; neither option changes
-#   .config.
+#   Optional board devices follow driver Kconfig symbols in the working
+#   .config. The board DTS describes LCD/touch when DRM_N32H7XX_LCDC is
+#   enabled, the render node when DRM_N32H7XX_GPU is enabled, OV5640/DVP when
+#   both camera drivers are enabled, and CM4 when N32H7XX_CM4_RPROC is
+#   enabled. There are no DTS feature or address macros to synchronise between
+#   this script and the device tree.
 #
 #   DEFCONFIG     seed configuration: a name under arch/$ARCH/configs/ or a
 #                 path.  It only *seeds* $BUILD_DIR/.config; a configuration
@@ -48,25 +42,7 @@ srctree=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 ARCH=${ARCH:-arm}
 CROSS_COMPILE=${CROSS_COMPILE:-arm-none-eabi-}
 BOARD=${BOARD:-n32h787-hmi}
-CAMERA=${CAMERA:-0}
-LCD=${LCD:-1}
-CM4=${CM4:-0}
 dtb_name=$BOARD.dtb
-case "$CAMERA" in
-1) ;;
-0) ;;
-*) echo "release.sh: CAMERA must be 0 or 1" >&2; exit 1 ;;
-esac
-case "$LCD" in
-1) ;;
-0) ;;
-*) echo "release.sh: LCD must be 0 or 1" >&2; exit 1 ;;
-esac
-case "$CM4" in
-1) ;;
-0) ;;
-*) echo "release.sh: CM4 must be 0 or 1" >&2; exit 1 ;;
-esac
 DEFCONFIG=${DEFCONFIG:-nsing_n32h7xx_defconfig}
 BUILD_DIR=${BUILD_DIR:-$srctree}
 STAGE_DIR=${STAGE_DIR:-$srctree/release}
@@ -85,12 +61,6 @@ ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE DEFCONFIG=$DEFCONFIG BUILD_DIR=$BUILD_DI
 	"$srctree/scripts/nsing/kconfig.sh" seed
 
 make -C "$srctree" $make_args zImage dtbs -j"${JOBS:-$(nproc)}"
-
-if [ "$CM4" = 1 ] && ! grep -q '^CONFIG_N32H7XX_CM4_RPROC=y$' "$BUILD_DIR/.config"; then
-	echo "release.sh: CM4=1 requires CONFIG_N32H7XX_CM4_RPROC=y" >&2
-	echo "            enable it with 'make kernel-menuconfig' first" >&2
-	exit 1
-fi
 
 # Install the loadable modules into a tree that mirrors what the board expects
 # ($MODULES_DIR/lib/modules/<release>/), including modules.dep, so the rootfs
@@ -133,44 +103,13 @@ else
 fi
 
 image="$bindir/zImage"
-base_dtb="$dtbdir/$BOARD.dtb"
 dtb="$outdir/$dtb_name"
-fdtoverlay="${BUILD_DIR%/}/scripts/dtc/fdtoverlay"
 
 test -s "$image"
-test -s "$base_dtb"
-test -x "$fdtoverlay"
+test -s "$dtbdir/$dtb_name"
 
 cp "$image" "$outdir/zImage"
-
-# Apply only the selected feature overlays.  The bootloader still sees one
-# ordinary flattened DTB, and adding another optional feature later does not
-# multiply board files or require a bootloader-side FDT resolver.
-set --
-if [ "$CAMERA" = 1 ]; then
-	overlay="$dtbdir/$BOARD-camera.dtbo"
-	test -s "$overlay"
-	set -- "$@" "$overlay"
-fi
-if [ "$LCD" = 1 ]; then
-	overlay="$dtbdir/$BOARD-display.dtbo"
-	test -s "$overlay"
-	set -- "$@" "$overlay"
-fi
-if [ "$CM4" = 1 ]; then
-	overlay="$dtbdir/$BOARD-cm4.dtbo"
-	test -s "$overlay"
-	set -- "$@" "$overlay"
-fi
-
-if [ "$#" -eq 0 ]; then
-	cp "$base_dtb" "$dtb"
-else
-	overlay_tmp="$outdir/.$dtb_name.overlay.tmp"
-	rm -f "$overlay_tmp"
-	"$fdtoverlay" -i "$base_dtb" -o "$overlay_tmp" "$@"
-	mv "$overlay_tmp" "$dtb"
-fi
+cp "$dtbdir/$dtb_name" "$dtb"
 if [ "$BUILD_DIR" != "$srctree" ]; then
 	cp "$BUILD_DIR/System.map" "$outdir/System.map"
 	cp "$BUILD_DIR/.config" "$outdir/config"

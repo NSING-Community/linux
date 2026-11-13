@@ -1,9 +1,0 @@
-// SPDX-License-Identifier: GPL-2.0-only
-
-/dts-v1/;
-/plugin/;
-
-&cm4 {
-	nsing,heartbeat-address = <0x30000330>;
-	status = "okay";
-};

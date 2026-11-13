@@ -2,24 +2,89 @@
 
 /dts-v1/;
 
-/*
- * The bootloader loads the flat device tree into the "dtb" partition slot in
- * SDRAM and hands Linux the address in r2; the kernel then keeps the blob for
- * the whole run, because initial_boot_params points into it and
- * /sys/firmware/fdt hands it out verbatim.  The bootloader also makes the
- * whole slot read-only in the MPU at hand-off, so reserve the same 64 KiB
- * here: the page allocator would otherwise hand out the tail of the slot past
- * fdt_totalsize() and the first store into it would take a MemManage fault.
+#include <linux/kconfig.h>
+
+/* -------------------------------------------------------------------------
+ * 1. Board features: select these in menuconfig, not in this DTS file.
  *
- * The address and size here, BOOT_DTB_LOAD_ADDR and BOOT_PART_DTB_MAX in
- * bootloader/CM7/src/boot_app.c, and the bootloader's read-only MPU region
- * all describe the same slot and have to move together.  No reserved pool
- * may overlap it.
+ *   CONFIG_DRM_N32H7XX_LCDC       LCD, panel, backlight and touch
+ *   CONFIG_DRM_N32H7XX_GPU        2D GPU
+ *   CONFIG_VIDEO_N32H7XX_DVP      DVP capture
+ *   CONFIG_VIDEO_OV5640           OV5640 sensor
+ *   CONFIG_N32H7XX_CM4_RPROC      Cortex-M4 remoteproc
+ *
+ * There is no second set of board switches or device-tree overlays.  CONFIG_FB
+ * is not used as a display switch because it is a generic framework option.
+ * ------------------------------------------------------------------------- */
+#define N32H787_HMI_HAS_LCD \
+	IS_ENABLED(CONFIG_DRM_N32H7XX_LCDC)
+#define N32H787_HMI_HAS_GPU \
+	IS_ENABLED(CONFIG_DRM_N32H7XX_GPU)
+#define N32H787_HMI_HAS_GRAPHICS \
+	(N32H787_HMI_HAS_LCD || N32H787_HMI_HAS_GPU)
+#define N32H787_HMI_HAS_CAMERA \
+	(IS_ENABLED(CONFIG_VIDEO_N32H7XX_DVP) && \
+	 IS_ENABLED(CONFIG_VIDEO_OV5640))
+#define N32H787_HMI_HAS_CM4 \
+	IS_ENABLED(CONFIG_N32H7XX_CM4_RPROC)
+
+/* -------------------------------------------------------------------------
+ * 2. Optional DMA memory sizes: these are the only numbers to tune here.
+ * Addresses are calculated from the enabled menuconfig features.
+ * ------------------------------------------------------------------------- */
+#define N32H787_HMI_GRAPHICS_DMA_SIZE 0x00300000 /* 3 MiB */
+#define N32H787_HMI_CAMERA_DMA_SIZE   0x00200000 /* 2 MiB */
+
+/* -------------------------------------------------------------------------
+ * 3. Internal DMA layout: do not calculate or edit these addresses.
+ *
+ * The band ends at the read-only DTB slot.  Graphics comes first, then camera.
+ * With the default sizes above, the resulting layouts are:
+ *   LCD/GPU only        graphics c1b00000..c1dfffff
+ *   camera only                         camera c1c00000..c1dfffff
+ *   LCD/GPU + camera    graphics c1900000..c1bfffff
+ *                       camera            c1c00000..c1dfffff
+ * ------------------------------------------------------------------------- */
+#define N32H787_HMI_DTB_SLOT_ADDR 0xc1e00000
+#define N32H787_HMI_DTB_SLOT_SIZE 0x00010000
+#define N32H787_HMI_OPTIONAL_DMA_END N32H787_HMI_DTB_SLOT_ADDR
+
+/*
+ * The bootloader loads the flat device tree into this SDRAM slot and hands
+ * Linux its address in r2.  The kernel keeps the blob for the whole run, and
+ * the bootloader makes the whole slot read-only in the MPU at hand-off, so
+ * reserve it here to keep the page allocator out of the unused tail.
+ *
+ * This address and size must match BOOT_DTB_LOAD_ADDR and BOOT_PART_DTB_MAX
+ * in bootloader/CM7/src/boot_app.c, and the bootloader's read-only MPU region.
  */
-/memreserve/ 0xc1e00000 0x00010000;
+/memreserve/ N32H787_HMI_DTB_SLOT_ADDR N32H787_HMI_DTB_SLOT_SIZE;
+
+#if N32H787_HMI_HAS_GRAPHICS
+#define N32H787_HMI_ACTIVE_GRAPHICS_DMA_SIZE N32H787_HMI_GRAPHICS_DMA_SIZE
+#else
+#define N32H787_HMI_ACTIVE_GRAPHICS_DMA_SIZE 0x00000000
+#endif
+
+#if N32H787_HMI_HAS_CAMERA
+#define N32H787_HMI_ACTIVE_CAMERA_DMA_SIZE N32H787_HMI_CAMERA_DMA_SIZE
+#else
+#define N32H787_HMI_ACTIVE_CAMERA_DMA_SIZE 0x00000000
+#endif
+
+#define N32H787_HMI_ACTIVE_OPTIONAL_DMA_SIZE \
+	(N32H787_HMI_ACTIVE_GRAPHICS_DMA_SIZE + \
+	 N32H787_HMI_ACTIVE_CAMERA_DMA_SIZE)
+#define N32H787_HMI_OPTIONAL_DMA_BASE \
+	(N32H787_HMI_OPTIONAL_DMA_END - N32H787_HMI_ACTIVE_OPTIONAL_DMA_SIZE)
+#define N32H787_HMI_GRAPHICS_DMA_BASE N32H787_HMI_OPTIONAL_DMA_BASE
+#define N32H787_HMI_CAMERA_DMA_BASE \
+	(N32H787_HMI_GRAPHICS_DMA_BASE + N32H787_HMI_ACTIVE_GRAPHICS_DMA_SIZE)
 
 #include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/interrupt-controller/irq.h>
 #include <dt-bindings/leds/common.h>
+#include <dt-bindings/media/video-interfaces.h>
 #include "n32h7xx.dtsi"
 
 / {
@@ -43,6 +108,7 @@
 		serial0 = &usart1;
 		usb0 = &usb1;
 		usb1 = &usb2;
+		i2c1 = &i2c1;
 		i2c4 = &i2c4;
 	};
 
@@ -102,6 +168,38 @@
 			reg = <0x1a>;
 			#sound-dai-cells = <0>;
 		};
+
+#if N32H787_HMI_HAS_CAMERA
+		ov5640: camera@3c {
+			compatible = "ovti,ov5640";
+			reg = <0x3c>;
+			clocks = <&clk_ov5640>;
+			clock-names = "xclk";
+			DOVDD-supply = <&ov5640_dovdd>;
+			AVDD-supply = <&ov5640_avdd>;
+			DVDD-supply = <&ov5640_dvdd>;
+			ovti,max-dvp-pclk-hz = <96000000>;
+
+			/*
+			 * PC13 is RESETB.  The driver toggles a powerdown GPIO
+			 * during power-up; declaring it as reset-gpios leaves this
+			 * module held in reset.
+			 */
+			powerdown-gpios = <&gpioc 13 GPIO_ACTIVE_LOW>;
+			status = "okay";
+
+			port {
+				ov5640_ep: endpoint {
+					remote-endpoint = <&dvp1_ep>;
+					bus-type = <MEDIA_BUS_TYPE_PARALLEL>;
+					bus-width = <8>;
+					hsync-active = <1>;
+					vsync-active = <0>;
+					pclk-sample = <1>;
+				};
+			};
+		};
+#endif
 	};
 
 	sound {
@@ -109,6 +207,110 @@
 		audio-cpu = <&i2s1>;
 		audio-codec = <&wm8978>;
 		nsing,mclk-frequency = <9375000>;
+	};
+
+#if N32H787_HMI_HAS_CAMERA
+	ov5640_dovdd: regulator-ov5640-dovdd {
+		compatible = "regulator-fixed";
+		regulator-name = "ov5640-dovdd";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+	};
+
+	ov5640_avdd: regulator-ov5640-avdd {
+		compatible = "regulator-fixed";
+		regulator-name = "ov5640-avdd";
+		regulator-min-microvolt = <2800000>;
+		regulator-max-microvolt = <2800000>;
+	};
+
+	ov5640_dvdd: regulator-ov5640-dvdd {
+		compatible = "regulator-fixed";
+		regulator-name = "ov5640-dvdd";
+		regulator-min-microvolt = <1500000>;
+		regulator-max-microvolt = <1500000>;
+	};
+
+	/* The camera module carries its own 24 MHz oscillator. */
+	clk_ov5640: clock-ov5640 {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <24000000>;
+	};
+#endif
+
+#if N32H787_HMI_HAS_LCD
+	lcd_power: regulator-lcd {
+		compatible = "regulator-fixed";
+		regulator-name = "lcd-3v3";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+	};
+
+	lcd_backlight: backlight {
+		compatible = "gpio-backlight";
+		gpios = <&gpioh 3 GPIO_ACTIVE_HIGH>;
+	};
+
+	panel: panel {
+		compatible = "nsing,n32h787-hmi-lcd", "panel-dpi";
+		power-supply = <&lcd_power>;
+		enable-gpios = <&gpiob 10 GPIO_ACTIVE_HIGH>;
+		backlight = <&lcd_backlight>;
+		/* NTW430T40X005A / ST7262: 25 MHz, 816 x 496 total. */
+		panel-timing {
+			clock-frequency = <25000000>;
+			hactive = <800>;
+			vactive = <480>;
+			hsync-len = <4>;
+			hback-porch = <8>;
+			hfront-porch = <4>;
+			vsync-len = <4>;
+			vback-porch = <8>;
+			vfront-porch = <4>;
+			hsync-active = <0>;
+			vsync-active = <0>;
+			de-active = <0>;
+			pixelclk-active = <1>;
+		};
+		port {
+			panel_in: endpoint {
+				remote-endpoint = <&lcdc_out>;
+			};
+		};
+	};
+#endif
+
+	/* I2C1 is a board bus; the LCD build also puts GT911 on it. */
+	i2c1: i2c1 {
+		compatible = "i2c-gpio";
+		#address-cells = <1>;
+		#size-cells = <0>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&i2c1_pins>;
+		scl-gpios = <&gpiod 4 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		sda-gpios = <&gpiod 5 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		i2c-gpio,delay-us = <5>;
+
+#if N32H787_HMI_HAS_LCD
+		touchscreen@14 {
+			compatible = "goodix,gt911";
+			reg = <0x14>;
+			interrupt-parent = <&gpiod>;
+			interrupts = <11 IRQ_TYPE_EDGE_FALLING>;
+			pinctrl-names = "default";
+			pinctrl-0 = <&touch_control_pins>;
+			irq-gpios = <&gpiod 11 GPIO_ACTIVE_HIGH>;
+			reset-gpios = <&gpiod 6 GPIO_ACTIVE_HIGH>;
+			AVDD28-supply = <&lcd_power>;
+			VDDIO-supply = <&lcd_power>;
+			touchscreen-size-x = <800>;
+			touchscreen-size-y = <480>;
+			touchscreen-inverted-x;
+			touchscreen-inverted-y;
+			status = "okay";
+		};
+#endif
 	};
 
 	/* The bootloader loads the raw zImage+DTB at the start of the 32 MiB
@@ -133,24 +335,28 @@
 		ranges;
 
 		/*
-		 * Optional devices allocate their large DMA pools from one
-		 * contiguous band.  Each pool stays disabled here and is enabled
-		 * by exactly one feature overlay, so feature combinations never
-		 * need separate board DTS files or duplicate the address map.
+		 * Optional devices share one contiguous band immediately below
+		 * the DTB slot.  Disabled features contribute a zero-sized slot,
+		 * so the next enabled pool moves down and the main memory region
+		 * stays contiguous.
 		 */
-		graphics_dma_pool: dma-pool@c1900000 {
+#if N32H787_HMI_HAS_GRAPHICS
+		graphics_dma_pool: graphics-dma-pool {
 			compatible = "shared-dma-pool";
-			reg = <0xc1900000 0x00300000>;
+			reg = <N32H787_HMI_GRAPHICS_DMA_BASE
+			       N32H787_HMI_GRAPHICS_DMA_SIZE>;
 			no-map;
-			status = "disabled";
 		};
+#endif
 
-		cam_dma_pool: dma-pool@c1c00000 {
+#if N32H787_HMI_HAS_CAMERA
+		cam_dma_pool: camera-dma-pool {
 			compatible = "shared-dma-pool";
-			reg = <0xc1c00000 0x00200000>;
+			reg = <N32H787_HMI_CAMERA_DMA_BASE
+			       N32H787_HMI_CAMERA_DMA_SIZE>;
 			no-map;
-			status = "disabled";
 		};
+#endif
 
 		/* Scanline, descriptor and coefficient storage for the JPEG codec. */
 		jpeg_dma_pool: dma-pool@c1e10000 {
@@ -186,6 +392,18 @@
 		bias-pull-up;
 		drive-strength = <3>;
 	};
+
+#if N32H787_HMI_HAS_CAMERA
+	dvp1_pins: dvp1-pins {
+		pins = "PC6", "PC7", "PB13", "PG11",
+		       "PE4", "PB6", "PE5", "PE6",
+		       "PA6", "PA4", "PB7";
+		function = "dvp1";
+		bias-disable;
+		drive-strength = <3>;
+		slew-rate = <0>;
+	};
+#endif
 
 	audio_pins: audio-pins {
 		mclk-pins {
@@ -281,6 +499,85 @@
 		};
 	};
 
+#if N32H787_HMI_HAS_LCD
+	lcdc_pins: lcdc-pins {
+		data-pins {
+			pins = "PJ1", "PJ2", "PI11", "PK3", "PK4", "PG7", "PI12", "PI13", "PK7";
+			function = "lcd";
+			bias-pull-up;
+			drive-strength = <2>;
+			slew-rate = <0>;
+		};
+		tolerant-data-pins {
+			pins = "PJ3", "PJ4", "PJ5", "PJ6", "PJ7", "PJ8", "PJ9", "PJ10", "PJ11", "PK0", "PD3", "PJ14", "PJ15", "PB9";
+			function = "lcd";
+			bias-pull-up;
+			drive-strength = <1>;
+			slew-rate = <0>;
+		};
+		lcd-r0-pins {
+			pins = "PI15";
+			function = "lcd_r0";
+			bias-pull-up;
+			drive-strength = <1>;
+			slew-rate = <0>;
+		};
+		lcd-r1-pins {
+			pins = "PJ0";
+			function = "lcd_r1";
+			bias-pull-up;
+			drive-strength = <1>;
+			slew-rate = <0>;
+		};
+		lcd-b0-pins {
+			pins = "PJ12";
+			function = "lcd_b0";
+			bias-pull-up;
+			drive-strength = <1>;
+			slew-rate = <0>;
+		};
+		lcd-b1-pins {
+			pins = "PJ13";
+			function = "lcd_b1";
+			bias-pull-up;
+			drive-strength = <1>;
+			slew-rate = <0>;
+		};
+		lcd-b6-pins {
+			pins = "PA15";
+			function = "lcd_b6";
+			bias-pull-up;
+			drive-strength = <1>;
+			slew-rate = <0>;
+		};
+	};
+
+	lcd_control_pins: lcd-control-pins {
+		pins = "PB10", "PH3";
+		bias-pull-up;
+		drive-strength = <2>;
+		slew-rate = <0>;
+	};
+#endif
+
+	i2c1_pins: i2c1-pins {
+		pins = "PD4", "PD5";
+		function = "gpio";
+		bias-pull-up;
+		drive-strength = <3>;
+		slew-rate = <0>;
+	};
+
+#if N32H787_HMI_HAS_LCD
+	touch_control_pins: touch-control-pins {
+		pins = "PD6", "PD11";
+		function = "gpio";
+		bias-pull-up;
+		drive-strength = <1>;
+		slew-rate = <0>;
+	};
+#endif
+
 };
 
 &usb1_phy {
@@ -297,6 +594,51 @@
 	nsing,ws-monitor = <&gpiog 10 GPIO_ACTIVE_HIGH>;
 	status = "okay";
 };
+
+#if N32H787_HMI_HAS_CAMERA
+&dvp1 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&dvp1_pins>;
+	memory-region = <&cam_dma_pool>;
+	status = "okay";
+
+	port {
+		dvp1_ep: endpoint {
+			remote-endpoint = <&ov5640_ep>;
+			bus-type = <MEDIA_BUS_TYPE_PARALLEL>;
+			bus-width = <8>;
+			/* The board input path presents the sensor syncs inverted. */
+			hsync-active = <0>;
+			vsync-active = <1>;
+			pclk-sample = <1>;
+		};
+	};
+};
+#endif
+
+#if N32H787_HMI_HAS_LCD
+&lcdc {
+	pinctrl-names = "default";
+	pinctrl-0 = <&lcdc_pins &lcd_control_pins>;
+	memory-region = <&graphics_dma_pool>;
+	nsing,flip-horizontal;
+	nsing,flip-vertical;
+	status = "okay";
+
+	port {
+		lcdc_out: endpoint {
+			remote-endpoint = <&panel_in>;
+		};
+	};
+};
+#endif
+
+#if N32H787_HMI_HAS_GPU
+&gpu {
+	memory-region = <&graphics_dma_pool>;
+	status = "okay";
+};
+#endif
 
 &usb2_phy {
 	status = "okay";
@@ -480,3 +822,10 @@
 	memory-region = <&jpeg_dma_pool>;
 	status = "okay";
 };
+
+#if N32H787_HMI_HAS_CM4
+&cm4 {
+	nsing,heartbeat-address = <0x30000330>;
+	status = "okay";
+};
+#endif
